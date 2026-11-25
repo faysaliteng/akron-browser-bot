@@ -1,6 +1,7 @@
 import { getSettings, saveSettings, getSavedPrompts, saveSavedPrompts, getSkills, saveSkills } from "../background/storage.js";
 import { describeSchedule } from "../shared/schedules.js";
-import { formatTaughtWorkflow } from "../shared/session-features.js";
+import { SUMMARY_MARK, formatTaughtWorkflow } from "../shared/session-features.js";
+import { mdToHtml } from "../shared/markdown.js";
 import { extractDocxText, extractPdfText } from "../shared/files.js";
 import { BROWSER_SPEECH_UNAVAILABLE, providerSpeechMessage, voiceErrorMessage } from "../shared/voice.js";
 import { CLOSE_PANEL_MESSAGE, panelTabId } from "../shared/panel.js";
@@ -77,53 +78,6 @@ const modelRequests = new Map();
 let panelZoom = 1;
 
 /* ------------------------------ helpers ------------------------------ */
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  }[c]));
-}
-
-function mdToHtml(src) {
-  let text = escapeHtml(src || "");
-
-  text = text.replace(/```([\s\S]*?)```/g, (_m, code) => {
-    return `<pre><code>${code.replace(/^\n+|\n+$/g, "")}</code></pre>`;
-  });
-  text = text.replace(/`([^`\n]+)`/g, "<code>$1</code>");
-  text = text.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  text = text.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-  text = text.replace(
-    /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>'
-  );
-  text = text.replace(
-    /(?<!["'>=])(https?:\/\/[^\s<)]+)/g,
-    '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'
-  );
-
-  const blocks = text.split(/\n{2,}/);
-  return blocks
-    .map((block) => {
-      const trimmed = block.trim();
-      if (!trimmed) return "";
-      if (/^<pre>/.test(trimmed)) return trimmed;
-      if (/^\s*[-*]\s+/m.test(trimmed)) {
-        const items = trimmed
-          .split("\n")
-          .filter((l) => l.trim())
-          .map((l) => `<li>${l.replace(/^\s*[-*]\s+/, "")}</li>`)
-          .join("");
-        return `<ul>${items}</ul>`;
-      }
-      return `<p>${block.replace(/\n/g, "<br>")}</p>`;
-    })
-    .join("");
-}
 
 function isNearBottom() {
   return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 90;
@@ -298,23 +252,32 @@ function appendAssistant(text) {
   scrollBottom();
 }
 
-function appendError(text) {
-  const wrap = document.createElement("div");
-  wrap.className = "msg error";
-  const bubble = document.createElement("div");
-  bubble.className = "bubble";
-  bubble.textContent = text;
+// Sends the user's last message again. Messages Akron wrote to itself (a
+// summary, a screenshot it sent along) are not the user's.
+function retryButton() {
   const retry = document.createElement("button");
   retry.type = "button";
   retry.className = "mini-btn";
   retry.textContent = "Retry";
   retry.addEventListener("click", () => {
-    const last = [...(state.conversation || [])].reverse().find((message) => message.role === "user");
+    const last = [...(state.conversation || [])].reverse().find((message) => message.role === "user" && !message.auto);
     if (!last?.content) return;
     inputEl.value = String(last.content);
     send();
   });
-  wrap.append(bubble, retry);
+  return retry;
+}
+
+// `retry` is for a task that failed. A notice about anything else (a button
+// that cannot be used right now, a file that was skipped) gets no Retry.
+function appendError(text, { retry = false } = {}) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg error";
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = text;
+  wrap.appendChild(bubble);
+  if (retry) wrap.appendChild(retryButton());
   addToChat(wrap);
   scrollBottom();
 }
@@ -436,7 +399,14 @@ function finalizeAllStreams() {
   for (const id of [...streamBubbles.keys()]) finalizeStream(id);
 }
 
-function renderConversation() {
+// The steps of the task that is working right now: they have no result yet.
+function stepsInFlight(conv, stillRunning) {
+  if (!stillRunning) return new Set();
+  const last = conv.findLast((m) => m?.role === "assistant" && Array.isArray(m.toolCalls));
+  return new Set((last?.toolCalls || []).map((call) => call.id));
+}
+
+function renderConversation(stillRunning = false) {
   stepEls.clear();
   streamBubbles.clear();
   const conv = state.conversation || [];
@@ -450,7 +420,11 @@ function renderConversation() {
 
   for (const m of conv) {
     if (!m || !m.role) continue;
-    if (m.role === "user") {
+    if (m.role === "user" && m.auto) {
+      // Written by Akron for the model (a summary of the older part, a
+      // screenshot it sent along), not said by the user.
+      if (String(m.content || "").includes(SUMMARY_MARK)) appendAssistant("Conversation compacted");
+    } else if (m.role === "user") {
       appendUser(m.content || "", m.images || (m.image ? [m.image] : []));
     } else if (m.role === "assistant") {
       if (String(m.content || "").trim()) appendAssistant(m.content);
@@ -462,9 +436,11 @@ function renderConversation() {
     }
   }
 
-  // A worker restart can leave an assistant tool_call without a result.
+  // A worker restart can leave an assistant tool_call without a result. A
+  // step of the task that is still working is simply not finished yet.
+  const inFlight = stepsInFlight(conv, stillRunning);
   for (const [id, record] of stepEls) {
-    if (record.details.classList.contains("running")) {
+    if (record.details.classList.contains("running") && !inFlight.has(id)) {
       finishStep(id, "error", "Interrupted — the extension worker restarted before this step finished.");
     }
   }
@@ -637,7 +613,8 @@ function renderHistory() {
     title.textContent = item.title || "New chat";
     const meta = document.createElement("span");
     meta.className = "history-meta";
-    meta.textContent = `${timeAgo(item.updatedAt)}${item.groupTitle ? " · " + item.groupTitle : ""}`;
+    const where = item.current ? " · open here" : "";
+    meta.textContent = `${timeAgo(item.updatedAt)}${item.groupTitle ? " · " + item.groupTitle : ""}${where}`;
     if (item.preview) {
       const preview = document.createElement("span");
       preview.className = "history-preview";
@@ -1481,17 +1458,24 @@ function answerConfirm(approved, scope = "once") {
   try {
     port.postMessage({ type: "confirm_response", id: pendingConfirmId, approved, scope, steps });
   } catch {}
-  pendingConfirmId = null;
-  $("permission-dock").classList.add("hidden");
-  $("confirm-modal").classList.add("hidden");
+  closeConfirm();
 }
 
-// Puts away a prompt without answering it. It belongs to another tab's task,
-// which keeps waiting and shows it again when the user returns to that tab.
-function dismissConfirm() {
+// Takes a prompt off the screen, and with it the line that said Akron waits
+// for the user: a task that goes on is working again, any other is not waiting.
+function closeConfirm() {
   pendingConfirmId = null;
   $("permission-dock").classList.add("hidden");
   $("confirm-modal").classList.add("hidden");
+  if (running) typingText.textContent = "Working…";
+  else if (!listening) typingEl.classList.add("hidden");
+}
+
+// Puts away a prompt without answering it: it was answered somewhere else
+// (the Stop shortcut, its time ran out), or it belongs to another tab's task,
+// which keeps waiting and shows it again when the user returns to that tab.
+function dismissConfirm() {
+  closeConfirm();
 }
 
 /* ---------------------------- messages ---------------------------- */
@@ -1514,7 +1498,7 @@ function onMessage(msg) {
       state.group = msg.group || null;
       state.activeEndpoint = null;
       updateSelectors();
-      renderConversation();
+      renderConversation(!!msg.running);
       renderOrchStatus();
       renderGroup();
       renderPermMode();
@@ -1608,7 +1592,7 @@ function onMessage(msg) {
       break;
     case "error":
       finalizeAllStreams();
-      appendError(msg.message || "Something went wrong.");
+      appendError(msg.message || "Something went wrong.", { retry: msg.retry !== false });
       break;
     case "need_provider":
       showNeedProvider(msg.message);
@@ -1677,6 +1661,10 @@ function onMessage(msg) {
       // leave it alone if it is already on screen (the user may be editing it).
       if (msg.id === pendingConfirmId && !$("permission-dock").classList.contains("hidden")) break;
       showConfirm(msg);
+      break;
+    case "confirm_closed":
+      // The worker settled it (Stop, or nobody answered in time).
+      if (msg.id === pendingConfirmId) dismissConfirm();
       break;
     case "schedules":
       schedules = msg.schedules || [];
@@ -1826,7 +1814,7 @@ function send() {
       images,
     });
   } catch {
-    appendError("Lost connection to the extension. Reload the panel.");
+    appendError("Lost connection to the extension. Reload the panel.", { retry: true });
     return;
   }
 }
@@ -2100,8 +2088,11 @@ $("group-release").addEventListener("click", () => {
   } catch {}
 });
 
+// The menus that open over the chat. A click outside one, or Escape, closes it.
+const POPOVER_IDS = ["prompts-panel", "tabs-panel", "history-panel", "sites-panel", "perm-mode-menu", "model-menu"];
+
 document.addEventListener("click", (e) => {
-  for (const id of ["prompts-panel", "tabs-panel", "history-panel", "sites-panel", "perm-mode-menu", "model-menu"]) {
+  for (const id of POPOVER_IDS) {
     const panel = $(id);
     if (panel.classList.contains("hidden")) continue;
     if (panel.contains(e.target)) continue;
@@ -2222,9 +2213,9 @@ document.addEventListener("keydown", (e) => {
       answerConfirm(false);
       return;
     }
-    $("prompts-panel").classList.add("hidden");
-    $("tabs-panel").classList.add("hidden");
-    $("history-panel").classList.add("hidden");
+    for (const id of POPOVER_IDS) $(id).classList.add("hidden");
+    $("model-chip").setAttribute("aria-expanded", "false");
+    $("perm-mode-btn").setAttribute("aria-expanded", "false");
     if (listening) recognition?.stop();
     return;
   }

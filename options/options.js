@@ -64,6 +64,44 @@ let schedules = [];
 let savedPrompts = [];
 let skills = [];
 
+// What each settings form showed when it was last filled in from storage. A
+// form that still shows it holds no unsaved input.
+const shown = { agent: {}, policy: {}, tools: [], orchestrator: {} };
+
+const sameValue = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+// What was changed in a form since it was filled in. Only that is saved: the
+// panel changes settings too (the permission mode, the model in use), and a
+// field left alone here must not put its old value back.
+function editedFields(form, before) {
+  return Object.fromEntries(
+    Object.entries(form).filter(([key, value]) => !sameValue(value, before[key]))
+  );
+}
+
+// Every save on this page changes what is stored right now, not what the page
+// last read: the panel and running tasks write to the same lists.
+async function updateSettings(change) {
+  const latest = await getSettings();
+  settings = change(latest);
+  if (settings !== latest) await saveSettings(settings);
+}
+
+async function updateProviders(change) {
+  providers = change(await getProviders());
+  await saveProviders(providers);
+}
+
+async function updateSkills(change) {
+  skills = change(await getSkills());
+  await saveSkills(skills);
+}
+
+async function updateSavedPrompts(change) {
+  savedPrompts = change(await getSavedPrompts());
+  await saveSavedPrompts(savedPrompts);
+}
+
 /* ------------------------------ init ------------------------------ */
 
 function populatePresetSelect() {
@@ -221,15 +259,18 @@ function renderProviders() {
 
 async function deleteProvider(p) {
   if (!confirm(`Delete provider "${p.name}"? Its API key will be removed.`)) return;
-  providers = providers.filter((x) => x.id !== p.id);
-  await saveProviders(providers);
+  await updateProviders((list) => list.filter((x) => x.id !== p.id));
 
-  if (settings.activeProviderId === p.id) {
-    settings.activeProviderId = providers[0]?.id || null;
-    settings.activeModel =
-      providers[0]?.defaultModel || (providers[0]?.models && providers[0].models[0]) || null;
-    await saveSettings(settings);
-  }
+  const first = providers[0];
+  await updateSettings((latest) =>
+    latest.activeProviderId === p.id
+      ? {
+          ...latest,
+          activeProviderId: first?.id || null,
+          activeModel: first?.defaultModel || (first?.models && first.models[0]) || null,
+        }
+      : latest
+  );
   renderProviders();
   renderAgentSettings();
   renderOrchestrator();
@@ -369,17 +410,17 @@ async function saveProviderFromForm(e) {
     return showTestResult("An API key is required.", "err");
   }
 
-  const idx = providers.findIndex((p) => p.id === cfg.id);
-  if (idx >= 0) providers[idx] = cfg;
-  else providers.push(cfg);
+  await updateProviders((list) =>
+    list.some((p) => p.id === cfg.id)
+      ? list.map((p) => (p.id === cfg.id ? cfg : p))
+      : [...list, cfg]
+  );
 
-  await saveProviders(providers);
-
-  if (!settings.activeProviderId) {
-    settings.activeProviderId = cfg.id;
-    settings.activeModel = cfg.defaultModel;
-    await saveSettings(settings);
-  }
+  await updateSettings((latest) =>
+    latest.activeProviderId
+      ? latest
+      : { ...latest, activeProviderId: cfg.id, activeModel: cfg.defaultModel }
+  );
 
   $("provider-form").classList.add("hidden");
   renderProviders();
@@ -435,6 +476,12 @@ async function fetchModelsFromForm() {
 /* -------------------------- agent settings -------------------------- */
 
 function renderAgentSettings() {
+  renderAgentForm();
+  renderApprovedSites();
+  renderPolicyForm();
+}
+
+function renderAgentForm() {
   const sel = $("s-provider");
   sel.innerHTML = "";
 
@@ -450,12 +497,9 @@ function renderAgentSettings() {
       o.textContent = p.name || p.type;
       sel.appendChild(o);
     }
-    if (!providers.some((p) => p.id === settings.activeProviderId)) {
-      settings.activeProviderId = providers[0].id;
-      settings.activeModel =
-        providers[0].defaultModel || (providers[0].models && providers[0].models[0]) || null;
-    }
-    sel.value = settings.activeProviderId;
+    // With no usable choice stored, the first provider is the one in use.
+    const active = providers.find((p) => p.id === settings.activeProviderId) || providers[0];
+    sel.value = active.id;
   }
 
   refreshAgentModelList();
@@ -474,13 +518,30 @@ function renderAgentSettings() {
   $("s-voice-lang").value = settings.voiceLang || "en-US";
   $("s-confirm-sites").checked = !!settings.confirmNewSites;
   $("s-permission-mode").value = settings.permissionMode === "skip" ? "skip" : "ask";
-  renderApprovedSites();
   $("s-domain-change").checked = !!settings.pauseOnDomainChange;
   $("s-autogroup").checked = settings.autoGroupTabs !== false;
   $("s-group-title").value = settings.groupTitle || "Akron";
   $("s-extra").value = settings.systemPromptExtra || "";
+  // A provider or model shown only because nothing usable is stored counts as
+  // unsaved, so Save stores it.
+  shown.agent = {
+    ...readAgentForm(),
+    activeProviderId: settings.activeProviderId,
+    activeModel: settings.activeModel,
+  };
+}
+
+function readPolicyForm() {
+  return {
+    allowedDomains: parseDomainList($("s-allowed").value),
+    blockedDomains: parseDomainList($("s-blocked").value),
+  };
+}
+
+function renderPolicyForm() {
   $("s-allowed").value = (settings.allowedDomains || []).join("\n");
   $("s-blocked").value = (settings.blockedDomains || []).join("\n");
+  shown.policy = readPolicyForm();
 }
 
 function refreshAgentModelList() {
@@ -503,19 +564,13 @@ function refreshAgentModelList() {
   $("s-model").value = preferred;
 }
 
-async function saveAgentSettings() {
-  const providerId = $("s-provider").value || null;
-  const model = $("s-model").value.trim() || null;
+function readAgentForm() {
   const temperature = Math.max(0, Math.min(2, Number($("s-temperature").value)));
-  const sendScreenshots = $("s-screenshots").checked;
-  const systemPromptExtra = $("s-extra").value;
-
-  settings = {
-    ...settings,
-    activeProviderId: providerId,
-    activeModel: model,
+  return {
+    activeProviderId: $("s-provider").value || null,
+    activeModel: $("s-model").value.trim() || null,
     temperature: Number.isFinite(temperature) ? temperature : 0.7,
-    sendScreenshots,
+    sendScreenshots: $("s-screenshots").checked,
     streaming: $("s-streaming").checked,
     soundOnComplete: $("s-sound").checked,
     notifyOnComplete: $("s-notify").checked,
@@ -530,10 +585,20 @@ async function saveAgentSettings() {
     pauseOnDomainChange: $("s-domain-change").checked,
     autoGroupTabs: $("s-autogroup").checked,
     groupTitle: $("s-group-title").value.trim() || "Akron",
-    systemPromptExtra,
+    systemPromptExtra: $("s-extra").value,
   };
-  await saveSettings(settings);
+}
 
+async function saveAgentSettings() {
+  const form = readAgentForm();
+  const edits = editedFields(form, shown.agent);
+  // A model belongs to its provider: the two are saved together.
+  const choice =
+    "activeProviderId" in edits || "activeModel" in edits
+      ? { activeProviderId: form.activeProviderId, activeModel: form.activeModel }
+      : {};
+  await updateSettings((latest) => ({ ...latest, ...edits, ...choice }));
+  renderAgentForm();
   flash($("save-result"), "Saved.");
 }
 
@@ -572,8 +637,10 @@ function renderApprovedSites() {
     revoke.className = "btn ghost small";
     revoke.textContent = "Revoke";
     revoke.addEventListener("click", async () => {
-      settings.approvedHosts = (settings.approvedHosts || []).filter((item) => item !== host);
-      await saveSettings(settings);
+      await updateSettings((latest) => ({
+        ...latest,
+        approvedHosts: latest.approvedHosts.filter((item) => item !== host),
+      }));
       renderApprovedSites();
     });
     row.append(name, revoke);
@@ -582,12 +649,9 @@ function renderApprovedSites() {
 }
 
 async function savePolicySettings() {
-  settings = {
-    ...settings,
-    allowedDomains: parseDomainList($("s-allowed").value),
-    blockedDomains: parseDomainList($("s-blocked").value),
-  };
-  await saveSettings(settings);
+  const form = readPolicyForm();
+  await updateSettings((latest) => ({ ...latest, ...form }));
+  shown.policy = form;
   flash($("save-policy-result"), "Saved.");
 }
 
@@ -609,16 +673,19 @@ function renderConfirmTools() {
     label.append(cb, span);
     list.appendChild(label);
   }
+  shown.tools = checkedTools();
+}
+
+function checkedTools() {
+  return [...document.querySelectorAll("#confirm-tools-list input:checked")].map(
+    (el) => el.value
+  );
 }
 
 async function saveToolSettings() {
-  settings = {
-    ...settings,
-    confirmTools: [...document.querySelectorAll("#confirm-tools-list input:checked")].map(
-      (el) => el.value
-    ),
-  };
-  await saveSettings(settings);
+  const confirmTools = checkedTools();
+  await updateSettings((latest) => ({ ...latest, confirmTools }));
+  shown.tools = confirmTools;
   flash($("save-tools-result"), "Saved.");
 }
 
@@ -645,9 +712,8 @@ function renderSkills() {
     cb.type = "checkbox";
     cb.checked = !!s.enabled;
     cb.addEventListener("change", async () => {
-      const target = skills.find((x) => x.id === s.id);
-      if (target) target.enabled = cb.checked;
-      await saveSkills(skills);
+      const enabled = cb.checked;
+      await updateSkills((list) => list.map((x) => (x.id === s.id ? { ...x, enabled } : x)));
     });
     const name = document.createElement("strong");
     name.textContent = s.name;
@@ -674,8 +740,7 @@ function renderSkills() {
       del.className = "btn danger small";
       del.textContent = "Delete";
       del.addEventListener("click", async () => {
-        skills = skills.filter((x) => x.id !== s.id);
-        await saveSkills(skills);
+        await updateSkills((list) => list.filter((x) => x.id !== s.id));
         renderSkills();
       });
       card.append(edit, del);
@@ -694,22 +759,23 @@ async function addSkill() {
     return;
   }
   const editId = $("sk-name").dataset.editId || "";
-  const existing = skills.find((skill) => skill.id === editId);
-  if (existing) {
-    existing.name = name;
-    existing.description = description;
-    existing.instructions = instructions;
-  } else {
-    skills.push({
-      id: makeId("skill"),
-      name,
-      description,
-      instructions,
-      enabled: true,
-      builtin: false,
-    });
-  }
-  await saveSkills(skills);
+  const added = {
+    id: makeId("skill"),
+    name,
+    description,
+    instructions,
+    enabled: true,
+    builtin: false,
+  };
+  await updateSkills((list) =>
+    list.some((skill) => skill.id === editId)
+      ? list.map((skill) =>
+          skill.id === editId ? { ...skill, name, description, instructions } : skill
+        )
+      : [...list, added]
+  );
+  // A skill that was deleted elsewhere while it was being edited is added again.
+  const existing = skills.some((skill) => skill.id === editId);
   $("sk-name").value = "";
   $("sk-desc").value = "";
   $("sk-instructions").value = "";
@@ -719,6 +785,15 @@ async function addSkill() {
 }
 
 /* ---------------------------- schedules ---------------------------- */
+
+// Changes the list as it is stored right now, not as this page last read it:
+// a task that ran in the meantime has written its result there.
+async function updateSchedules(change) {
+  schedules = change(await getSchedules());
+  await saveSchedules(schedules);
+  renderSchedules();
+}
+
 
 function renderSchedules() {
   const list = $("schedule-list");
@@ -759,10 +834,8 @@ function renderSchedules() {
     toggle.className = "btn ghost small";
     toggle.textContent = s.enabled ? "Pause" : "Enable";
     toggle.addEventListener("click", async () => {
-      const target = schedules.find((x) => x.id === s.id);
-      if (target) target.enabled = !target.enabled;
-      await saveSchedules(schedules);
-      renderSchedules();
+      const enabled = !s.enabled;
+      await updateSchedules((list) => list.map((x) => (x.id === s.id ? { ...x, enabled } : x)));
     });
 
     const run = document.createElement("button");
@@ -789,9 +862,7 @@ function renderSchedules() {
     del.textContent = "Delete";
     del.addEventListener("click", async () => {
       if (!confirm(`Delete scheduled task "${s.title || s.prompt.slice(0, 30)}"?`)) return;
-      schedules = schedules.filter((x) => x.id !== s.id);
-      await saveSchedules(schedules);
-      renderSchedules();
+      await updateSchedules((list) => list.filter((x) => x.id !== s.id));
     });
 
     actions.append(toggle, run, del);
@@ -809,7 +880,7 @@ async function addSchedule() {
   }
   const everyMinutes = Math.max(1, Number($("sch-every").value) || 60);
   const repeatType = $("sch-repeat").value || "interval";
-  schedules.push({
+  const added = {
     id: makeId("sched"),
     title: $("sch-title").value.trim() || prompt.slice(0, 50),
     prompt,
@@ -823,13 +894,12 @@ async function addSchedule() {
     monthAndDay: $("sch-annual").value || "01-01",
     enabled: $("sch-enabled").checked,
     createdAt: Date.now(),
-  });
-  await saveSchedules(schedules);
+  };
+  await updateSchedules((list) => [...list, added]);
   $("sch-title").value = "";
   $("sch-prompt").value = "";
   $("sch-url").value = "";
   $("sch-every").value = "60";
-  renderSchedules();
   flash($("schedule-result"), "Schedule added.");
 }
 
@@ -858,8 +928,7 @@ function renderSavedPrompts() {
     del.className = "btn danger small";
     del.textContent = "Delete";
     del.addEventListener("click", async () => {
-      savedPrompts = savedPrompts.filter((x) => x.id !== p.id);
-      await saveSavedPrompts(savedPrompts);
+      await updateSavedPrompts((list) => list.filter((x) => x.id !== p.id));
       renderSavedPrompts();
     });
 
@@ -875,13 +944,13 @@ async function addSavedPrompt() {
     $("prompt-result").className = "test-result err";
     return;
   }
-  savedPrompts.unshift({
+  const added = {
     id: makeId("p"),
     title: $("sp-title").value.trim() || text.split("\n")[0].slice(0, 50),
     text,
     createdAt: Date.now(),
-  });
-  await saveSavedPrompts(savedPrompts);
+  };
+  await updateSavedPrompts((list) => [added, ...list]);
   $("sp-title").value = "";
   $("sp-text").value = "";
   renderSavedPrompts();
@@ -946,6 +1015,7 @@ function renderOrchestrator() {
     empty.textContent = "Add a provider first, then select models for orchestrator mode.";
     pool.appendChild(empty);
     updateOrchSummary();
+    shown.orchestrator = readOrchestratorForm();
     return;
   }
 
@@ -994,28 +1064,27 @@ function renderOrchestrator() {
   }
 
   updateOrchSummary();
+  shown.orchestrator = readOrchestratorForm();
 }
 
-async function saveOrchestrator() {
-  const maxAttempts = Math.max(
-    1,
-    Math.min(200, Number($("s-orch-max").value) || 200)
-  );
-  const cooldownSeconds = Math.max(
-    5,
-    Math.min(86400, Number($("s-orch-cooldown").value) || 60)
-  );
-  settings = {
-    ...settings,
-    orchestrator: {
-      enabled: $("s-orchestrator").checked,
-      endpoints: selectedOrchestratorEndpoints(),
-      maxAttempts,
-      cooldownSeconds,
-    },
+function readOrchestratorForm() {
+  return {
+    enabled: $("s-orchestrator").checked,
+    endpoints: selectedOrchestratorEndpoints(),
+    maxAttempts: Math.max(1, Math.min(200, Number($("s-orch-max").value) || 200)),
+    cooldownSeconds: Math.max(5, Math.min(86400, Number($("s-orch-cooldown").value) || 60)),
   };
-  await saveSettings(settings);
-  updateOrchSummary();
+}
+
+// The panel switches orchestrator mode on and off as well, so only what was
+// changed here is written.
+async function saveOrchestrator() {
+  const edits = editedFields(readOrchestratorForm(), shown.orchestrator);
+  await updateSettings((latest) => ({
+    ...latest,
+    orchestrator: { ...latest.orchestrator, ...edits },
+  }));
+  renderOrchestrator();
   flash($("orch-result"), "Orchestrator saved.");
 }
 
@@ -1023,7 +1092,7 @@ async function refreshAllModelLists() {
   const btn = $("orch-refresh-models");
   btn.disabled = true;
   btn.textContent = "Refreshing…";
-  let updated = 0;
+  const found = new Map();
   let failed = 0;
   const queue = [...providers];
 
@@ -1042,12 +1111,8 @@ async function refreshAllModelLists() {
             if (![401, 403, 429].includes(Number(e?.status))) break;
           }
         }
-        if (models?.length) {
-          provider.models = [...new Set([...models, ...(provider.models || [])])];
-          updated++;
-        } else {
-          failed++;
-        }
+        if (models?.length) found.set(provider.id, models);
+        else failed++;
       } catch {
         failed++;
       }
@@ -1058,13 +1123,23 @@ async function refreshAllModelLists() {
     Array.from({ length: Math.min(4, Math.max(1, queue.length)) }, worker)
   );
 
-  if (updated) await saveProviders(providers);
+  // Asking every provider takes a while: the names go into the list as it is
+  // stored now, not as it was when the asking started.
+  if (found.size) {
+    await updateProviders((list) =>
+      list.map((p) =>
+        found.has(p.id)
+          ? { ...p, models: [...new Set([...found.get(p.id), ...(p.models || [])])] }
+          : p
+      )
+    );
+  }
   renderProviders();
   renderAgentSettings();
   renderOrchestrator();
   flash(
     $("orch-result"),
-    `Refreshed ${updated} provider(s)${failed ? `, ${failed} failed` : ""}.`
+    `Refreshed ${found.size} provider(s)${failed ? `, ${failed} failed` : ""}.`
   );
   btn.disabled = false;
   btn.textContent = "Refresh model lists";
@@ -1096,15 +1171,7 @@ function bindEvents() {
 
   $("f-models").addEventListener("input", updateModelDatalist);
 
-  $("s-provider").addEventListener("change", () => {
-    const provider = providers.find((p) => p.id === $("s-provider").value);
-    if (provider) {
-      settings.activeProviderId = provider.id;
-      settings.activeModel =
-        provider.defaultModel || (provider.models && provider.models[0]) || null;
-    }
-    refreshAgentModelList();
-  });
+  $("s-provider").addEventListener("change", refreshAgentModelList);
 
   $("save-settings").addEventListener("click", saveAgentSettings);
   $("save-policy").addEventListener("click", savePolicySettings);
@@ -1134,8 +1201,8 @@ function bindEvents() {
     const file = $("skill-file").files?.[0];
     if (!file) return;
     const parsed = parseSkillMd(await file.text());
-    skills.push({ id: makeId("skill"), ...parsed, enabled: true });
-    await saveSkills(skills);
+    const imported = { id: makeId("skill"), ...parsed, enabled: true };
+    await updateSkills((list) => [...list, imported]);
     renderSkills();
     flash($("skill-result"), `Imported ${parsed.name}.`);
     $("skill-file").value = "";
@@ -1152,6 +1219,49 @@ function bindEvents() {
   $("add-schedule").addEventListener("click", addSchedule);
   $("add-saved-prompt").addEventListener("click", addSavedPrompt);
 }
+
+/* ---------------------- changes made elsewhere ---------------------- */
+
+// The panel and running tasks write to the same storage while this page is
+// open. The lists follow at once; a form follows unless it holds unsaved input.
+function followSettings() {
+  renderApprovedSites();
+  if (sameValue(readAgentForm(), shown.agent)) renderAgentForm();
+  if (sameValue(readPolicyForm(), shown.policy)) renderPolicyForm();
+  if (sameValue(checkedTools(), shown.tools)) renderConfirmTools();
+  if (sameValue(readOrchestratorForm(), shown.orchestrator)) renderOrchestrator();
+}
+
+const FOLLOWED = {
+  autobot_settings: async () => {
+    settings = await getSettings();
+    followSettings();
+  },
+  autobot_providers: async () => {
+    providers = await getProviders();
+    renderProviders();
+    followSettings();
+  },
+  autobot_skills: async () => {
+    skills = await getSkills();
+    renderSkills();
+  },
+  autobot_saved_prompts: async () => {
+    savedPrompts = await getSavedPrompts();
+    renderSavedPrompts();
+  },
+  autobot_schedules: async () => {
+    schedules = await getSchedules();
+    renderSchedules();
+  },
+};
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  for (const [key, follow] of Object.entries(FOLLOWED)) {
+    if (changes[key]) follow();
+  }
+});
 
 window.addEventListener("hashchange", applyHash);
 

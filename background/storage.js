@@ -108,7 +108,7 @@ async function readConversationKey(key) {
   return Array.isArray(r[key]) ? r[key] : [];
 }
 
-function sessionConversationKey(sessionId) {
+export function sessionConversationKey(sessionId) {
   return sessionId && sessionId !== "default"
     ? `${CONVERSATION_KEY}_${sessionId}`
     : CONVERSATION_KEY;

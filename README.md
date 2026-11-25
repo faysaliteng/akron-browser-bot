@@ -182,9 +182,16 @@ Akron behaves like Claude in Chrome's isolated workspace:
 - The group's title shows how its task stands: **⌛** while it works, **🔔** when
   it waits for your approval, **✅** when it finished while you were on another
   tab. The tick goes away when you look at one of the group's tabs.
-- Chat history is separate per session. Open the **🕘** history button in the
-  corner to list every past chat (title, preview, group, time) and jump back to
-  one; live chats open their tab, closed ones reload the conversation.
+- Every chat is kept. **New chat** puts the current conversation aside instead
+  of deleting it, and so does closing its tab or restarting the browser. Open
+  the **🕘** history button in the corner to list every past chat (title,
+  preview, group, time) and open one again in the panel you are in. A chat that
+  is in use in another panel takes you to that tab instead; the chat you are
+  looking at is marked "open here". Panels with no messages are not listed.
+- The Settings page can stay open while you work. It shows what the panel and
+  running tasks save (permission mode, approved sites, results of scheduled
+  tasks, new skills) as it happens, and a save there writes only what you
+  changed on the page.
 - A task starts on the tab its panel is on, like Claude. Before every step the
   model is told where it is: the current tab's id, title and address (without
   the query string), the other tabs of its group, and that your request is about
@@ -424,6 +431,7 @@ background/
   cdp.js                      chrome.debugger: trusted input, element/full-page capture
   prompts.js                  system prompt + domain policy + active skills
   storage.js                  chrome.storage.local persistence, skills, schedules, prompts
+  chat-store.js               past chats: list, file under an id of their own, read, remove
   scheduler.js                chrome.alarms scheduled tasks
   run-task.js                 shared provider/model/skill resolution for task runs
   gif.js                      frame capture + export orchestration
@@ -433,6 +441,7 @@ shared/
   local-seed.js               applies the optional local-provider.json (keys + pool)
   panel.js                    side panel address per tab + the close message
   step-labels.js              plain wording for steps, the status line, thinking preview
+  markdown.js                 answers as safe HTML: lists, headings, code, links
   results.js                  results saved with save_result: list rules, report, masking
   group-title.js              status mark on the tab group's title (⌛ 🔔 ✅)
   tab-context.js              "where you are" block of the prompt: current tab + group tabs
@@ -448,7 +457,7 @@ onboarding/                   first-run welcome page
 offscreen/                    GIF89a encoder (LZW), chime, worker keep-alive, local speech model (in its own thread)
 _locales/                     en, de, es, fr, ja, zh_CN manifest strings
 tools/seal-brand.mjs          renews the logo fingerprints after the owner changes the logo
-tests/                        node test suite (699 checks)
+tests/                        node test suite (774 checks)
 ```
 
 **Flow**
@@ -468,7 +477,7 @@ tests/                        node test suite (699 checks)
 ## Verification
 
 ```bash
-npm test              # 699 checks, 0 failures
+npm test              # 774 checks, 0 failures
 npm run test:live     # optional real NVIDIA/DeepSeek run; skips if the env keys are absent
 npm run check         # syntax-check every JS file
 npm run test:runtime  # real Chromium end-to-end test (61 checks)

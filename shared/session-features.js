@@ -162,6 +162,11 @@ export function currentTask(messages) {
   return "";
 }
 
+// Starts the summary that stands in for the older part of a long chat. The
+// panel knows that message by it: it is Akron's note to the model, not
+// something the user said.
+export const SUMMARY_MARK = "Conversation summary so we can keep chatting:";
+
 export function applyCompaction(messages, summary) {
   const list = messages || [];
   const recent = sanitizeRecent(list.slice(-4));
@@ -173,7 +178,7 @@ export function applyCompaction(messages, summary) {
   return [
     {
       role: "user",
-      content: `${head}Conversation summary so we can keep chatting:\n${String(summary || "").trim()}`,
+      content: `${head}${SUMMARY_MARK}\n${String(summary || "").trim()}`,
       auto: true,
       ...(task ? { task } : {}),
     },

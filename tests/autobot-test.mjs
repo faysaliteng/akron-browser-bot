@@ -3032,6 +3032,230 @@ console.log("\n[the name and logo are sealed]");
   check("the licence and the trademark notice ship with the code", fs.existsSync(path.join(ROOT, "LICENSE")) && fs.existsSync(path.join(ROOT, "TRADEMARK.md")));
 }
 
+/* ---------- past chats ---------- */
+console.log("\n[past chats can be opened again]");
+{
+  const chats = await mod("background/chat-store.js");
+  const CONV = "autobot_conversation_";
+  const META = "autobot_session_meta_";
+  const isChatKey = (key) => key.startsWith(CONV) || key.startsWith(META);
+  const before = Object.fromEntries(Object.entries(store).filter(([key]) => isChatKey(key)));
+  for (const key of Object.keys(before)) delete store[key];
+  const SAVED_VALUE = "VALUE-7781-KEPT-IN-CHAT";
+  const talk = (word) => [
+    { role: "user", content: `Find ${word} for me` },
+    { role: "assistant", content: `**Answer:** ${word} is here.` },
+  ];
+  const titleOf = async (id) => (await chats.listChats()).find((chat) => chat.id === id)?.title;
+  try {
+    // A chat on tab 11, and a panel on tab 12 that was only opened.
+    store[CONV + "t11"] = talk("alpha");
+    store[META + "t11"] = { tabId: 11, groupId: 5, groupTitle: "Akron", title: "Find alpha for me", preview: "**Answer:** alpha is here.", results: [{ label: "code", value: SAVED_VALUE }], createdAt: 100, updatedAt: 200 };
+    store[META + "t12"] = { tabId: 12, groupId: null, groupTitle: "Akron", title: null, preview: null, results: [], createdAt: 300, updatedAt: 300 };
+
+    let list = await chats.listChats();
+    check("only a chat with messages is listed", list.length === 1 && list[0].id === "t11", JSON.stringify(list));
+    check("the row shows the chat's name and one plain line", list[0].title === "Find alpha for me" && list[0].preview === "Answer: alpha is here.", JSON.stringify(list[0]));
+    check("a history row never carries what a task saved", !("results" in list[0]) && !JSON.stringify(list).includes(SAVED_VALUE));
+
+    // Putting a chat aside.
+    const filedId = await chats.fileChat("t11");
+    check("a chat that is put aside gets an id of its own", /^c[a-z0-9]+$/.test(String(filedId)) && !chats.isTabChatId(filedId), String(filedId));
+    check("its messages move with it", JSON.stringify(store[CONV + filedId]) === JSON.stringify(talk("alpha")) && !(CONV + "t11" in store));
+    check("it belongs to no tab and no group any more", store[META + filedId]?.tabId === null && store[META + filedId]?.groupId === null && !(META + "t11" in store));
+    check(
+      "its name, saved results and dates are kept",
+      store[META + filedId]?.title === "Find alpha for me" && store[META + filedId]?.results?.[0]?.value === SAVED_VALUE && store[META + filedId]?.createdAt === 100 && store[META + filedId]?.updatedAt === 200
+    );
+    check("a chat without messages is only removed", (await chats.fileChat("t12")) === null && !(META + "t12" in store));
+
+    // Reading one back.
+    const read = await chats.readChat(filedId);
+    check("a stored chat is read with its messages and its record", read?.conversation?.length === 2 && read.meta.title === "Find alpha for me" && read.meta.results?.[0]?.value === SAVED_VALUE);
+    check("a chat that is not stored reads as nothing", (await chats.readChat("c-not-there")) === null);
+    check("an id that is not a chat id is refused", (await chats.readChat("../settings")) === null && (await chats.fileChat("a b")) === null && !chats.isChatId(""));
+
+    // Names.
+    store[CONV + "t13"] = talk("beta");
+    store[META + "t13"] = { tabId: 13, title: "The name of an older chat", preview: "beta is here.", updatedAt: 400 };
+    check("a name left over from another chat gives way to the chat's own first message", (await titleOf("t13")) === "Find beta for me", String(await titleOf("t13")));
+    store[CONV + "t14"] = [{ role: "user", content: "Conversation summary so we can keep chatting:\nThe user wanted gamma.", auto: true }, ...talk("gamma").slice(1)];
+    store[META + "t14"] = { tabId: 14, title: "Find gamma for me", updatedAt: 500 };
+    check("a chat that was summarised keeps its name", (await titleOf("t14")) === "Find gamma for me");
+    store[CONV + "t15"] = talk("epsilon");
+    check("a chat with no record is still listed, named after its first message", (await titleOf("t15")) === "Find epsilon for me");
+    delete store[CONV + "t15"];
+
+    // When the browser starts.
+    store[CONV + "w3"] = talk("delta");
+    store[META + "w3"] = { title: "Find delta for me", updatedAt: 600 };
+    store[META + "t16"] = { tabId: 16, title: null, updatedAt: 700 };
+    const kept = await chats.fileTabChats((id) => id === "t13");
+    check("chats of tabs and windows that are gone are put aside", kept === 2 && !(CONV + "t14" in store) && !(CONV + "w3" in store), String(kept));
+    check("an empty record of a tab that is gone is removed", !(META + "t16" in store));
+    check("a tab that is still open keeps its chat", CONV + "t13" in store && META + "t13" in store);
+    const idsBefore = Object.keys(store).filter(isChatKey).sort().join();
+    check("a chat that was put aside is left alone the next time", (await chats.fileTabChats((id) => id === "t13")) === 0 && Object.keys(store).filter(isChatKey).sort().join() === idsBefore);
+    list = await chats.listChats();
+    check("nothing was lost on the way", list.length === 4 && ["alpha", "beta", "gamma", "delta"].every((word) => list.some((chat) => chat.title === `Find ${word} for me`)), JSON.stringify(list.map((chat) => chat.title)));
+    check("the list is newest first", list.map((chat) => chat.updatedAt).join() === "600,500,400,200", list.map((chat) => chat.updatedAt).join());
+
+    await chats.removeChat(filedId);
+    check("a removed chat is gone, messages and record", !(CONV + filedId in store) && !(META + filedId in store));
+
+    check(
+      "the preview leaves out the marks of formatted text",
+      chats.plainPreview("## Result\n- **Total:** 5 * 3 = `15`, see [the page](https://example.com/x)") === "Result Total: 5 * 3 = 15, see the page",
+      chats.plainPreview("## Result\n- **Total:** 5 * 3 = `15`, see [the page](https://example.com/x)")
+    );
+    check("a name with an underscore keeps it", chats.plainPreview("Set max_steps to 4") === "Set max_steps to 4");
+  } finally {
+    for (const key of Object.keys(store).filter(isChatKey)) delete store[key];
+    Object.assign(store, before);
+  }
+
+  // How the worker uses it.
+  check("New chat puts the chat aside instead of deleting it", /case "clear": \{[\s\S]{0,700}await putChatAside\(session\);/.test(swSrc) && !swSrc.includes("clearSessionConversation"));
+  check("a new chat starts without the old one's name", /async function putChatAside\(session\) \{[\s\S]{0,500}session\.title = null;\s*session\.preview = null;/.test(swSrc));
+  check("a past chat opens in the panel that asked for it", /case "open_session": \{\s*await openChat\(port, /.test(swSrc) && /await adoptChat\(session, chat\);/.test(swSrc));
+  check("a chat at work or on show in another panel is not taken away", /if \(live && \(live\.running \|\| sessionHasPanel\(live\)\)\) \{[\s\S]{0,300}return;/.test(swSrc));
+  check("a chat cannot be opened over a running task", /if \(session\.running\) \{\s*port\.postMessage\(\{ type: "error", retry: false, message: "Wait for the current task to finish before opening another chat\." \}\);\s*return;/.test(swSrc));
+  check("the chat is written to its new place before the old one is removed", /await saveSessionConversation\(session\.id, session\.conversation\);\s*await saveSessionMeta\(session\);\s*await removeChat\(chat\.id\);/.test(swSrc));
+  check("chats are read only after the stale ones were put aside", /async function ensureLoaded\(session\) \{\s*if \(session\.loaded\) return;\s*await staleChatsFiled;/.test(swSrc));
+  check("that runs once per browser start, and open tabs keep their chats", /chrome\.storage\.session/.test(swSrc) && /await fileTabChats\(\(id\) => open\.has\(id\)\);/.test(swSrc));
+  check("a chat without messages does not inherit an older name", /if \(!conversation\.length\) \{[\s\S]{0,200}session\.title = null;/.test(swSrc));
+  check("the panel marks the chat that is open in it", /item\.current \? " · open here" : ""/.test(panelSrc));
+}
+
+/* ---------- answers in the chat ---------- */
+console.log("\n[answers are shown as written]");
+{
+  const { mdToHtml } = await mod("shared/markdown.js");
+  const link = '<a href="https://example.com/x" target="_blank" rel="noopener noreferrer">';
+  check("a line before a list stays a line of text", mdToHtml("Found:\n- a\n- b") === "<p>Found:</p><ul><li>a</li><li>b</li></ul>", mdToHtml("Found:\n- a\n- b"));
+  check("text after a list is a paragraph again", mdToHtml("- a\nDone.") === "<ul><li>a</li></ul><p>Done.</p>", mdToHtml("- a\nDone."));
+  check("a heading is shown without its marks", mdToHtml("## Totals") === "<h4>Totals</h4>" && mdToHtml("# Title #") === "<h4>Title</h4>", mdToHtml("# Title #"));
+  check("a numbered list is a numbered list", mdToHtml("1. one\n2. two") === "<ol><li>one</li><li>two</li></ol>", mdToHtml("1. one\n2. two"));
+  check("a list that goes on after an empty line keeps counting", mdToHtml("1. one\n\n2. two") === '<ol><li>one</li></ol><ol start="2"><li>two</li></ol>', mdToHtml("1. one\n\n2. two"));
+  check("points and numbers are two lists", mdToHtml("- a\n1. b") === "<ul><li>a</li></ul><ol><li>b</li></ol>", mdToHtml("- a\n1. b"));
+  check("the lines of a paragraph break where they were broken", mdToHtml("one\ntwo\n\nthree") === "<p>one<br>two</p><p>three</p>", mdToHtml("one\ntwo\n\nthree"));
+  check(
+    "bold, emphasis, code and links",
+    mdToHtml("**b** *e* `c` [t](https://example.com/x)") === `<p><strong>b</strong> <em>e</em> <code>c</code> ${link}t</a></p>`,
+    mdToHtml("**b** *e* `c` [t](https://example.com/x)")
+  );
+  check("a bare address becomes a link", mdToHtml("See https://example.com/x") === `<p>See ${link}https://example.com/x</a></p>`, mdToHtml("See https://example.com/x"));
+  const code = mdToHtml("```js\n# not a heading\n\n- not a list **x**\n```");
+  check("code is kept as written, empty lines included", code === "<pre><code># not a heading\n\n- not a list **x**</code></pre>", code);
+  const around = mdToHtml("Run:\n```\nls\n```\n**done**");
+  check("the text around code is still formatted", around === "<p>Run:</p><pre><code>ls</code></pre><p><strong>done</strong></p>", around);
+  const hostile = mdToHtml('<img src=x onerror="alert(1)"> <script>x</script>');
+  check("markup in an answer is shown as text, never run", hostile === "<p>&lt;img src=x onerror=&quot;alert(1)&quot;&gt; &lt;script&gt;x&lt;/script&gt;</p>", hostile);
+  check("a link cannot bring an attribute of its own", !/<a [^>]*\sonclick=/i.test(mdToHtml('[t](https://example.com/" onclick="x)')) && !/<a [^>]*\sonclick=/i.test(mdToHtml('https://example.com/"onclick="x')));
+  check("only http links are made", !mdToHtml("[t](javascript:alert(1))").includes("<a "));
+  check("a stand-in mark typed into the text does not become code", mdToHtml("\u00000\u0000") === "<p>0</p>", mdToHtml("\u00000\u0000"));
+  check("an empty answer is empty", mdToHtml("") === "" && mdToHtml(null) === "");
+  check("the panel uses this one renderer", panelSrc.includes('import { mdToHtml } from "../shared/markdown.js";') && !/function mdToHtml\(/.test(panelSrc));
+}
+
+/* ---------- a reopened chat, notices, approvals ---------- */
+console.log("\n[a reopened chat and the panel's notices]");
+{
+  const summary = sessionFeatures.applyCompaction([{ role: "user", content: "Find alpha" }, { role: "assistant", content: "Looking." }], "The user wants alpha.")[0];
+  check("the summary of a long chat is marked as Akron's own note", summary.auto === true && summary.content.includes(sessionFeatures.SUMMARY_MARK));
+  check(
+    "a reopened chat does not show Akron's notes to the model as the user's words",
+    /if \(m\.role === "user" && m\.auto\) \{[\s\S]{0,400}includes\(SUMMARY_MARK\)\) appendAssistant\("Conversation compacted"\);\s*\} else if \(m\.role === "user"\) \{/.test(panelSrc)
+  );
+  check("a step of a task that is still working is not called failed", /renderConversation\(!!msg\.running\)/.test(panelSrc) && /classList\.contains\("running"\) && !inFlight\.has\(id\)/.test(panelSrc));
+  check("only a failed task offers Retry", /function appendError\(text, \{ retry = false \} = \{\}\)/.test(panelSrc) && /appendError\(msg\.message \|\| "Something went wrong\.", \{ retry: msg\.retry !== false \}\)/.test(panelSrc));
+  check("Retry sends the user's own last message", /find\(\(message\) => message\.role === "user" && !message\.auto\)/.test(panelSrc));
+  check(
+    "a button that cannot be used right now answers without Retry",
+    /retry: false,\s*message: "Wait for the current task to finish before clearing\."/.test(swSrc) &&
+      /retry: false,\s*message: "Stop the current task before releasing the tab group\."/.test(swSrc) &&
+      /retry: false, message: "Wait for the current task to finish before opening another chat\."/.test(swSrc)
+  );
+  check("the panel is told when an approval was settled elsewhere", /broadcastToSession\(session, \{ type: "confirm_closed", id: request\.id \}\);/.test(swSrc) && /case "confirm_closed":\s*(\/\/[^\n]*\s*)?if \(msg\.id === pendingConfirmId\) dismissConfirm\(\);/.test(panelSrc));
+  check("a closed approval takes the waiting line with it", /function closeConfirm\(\) \{[\s\S]{0,300}if \(running\) typingText\.textContent = "Working…";\s*else if \(!listening\) typingEl\.classList\.add\("hidden"\);/.test(panelSrc));
+  check("the Stop shortcut also answers a waiting approval", /command === "stop-task"\) \{[\s\S]{0,300}\.then\(\(session\) => stopSession\(session\)\);/.test(swSrc));
+  check("Escape closes every menu a click outside closes", /for \(const id of POPOVER_IDS\) \$\(id\)\.classList\.add\("hidden"\);/.test(panelSrc) && /for \(const id of POPOVER_IDS\) \{/.test(panelSrc));
+}
+
+/* ---------- scheduled tasks and the Settings page next to the panel ---------- */
+console.log("\n[one place does not undo what another saved]");
+{
+  const keptSchedules = store.autobot_schedules;
+  const keptSettings = store.autobot_settings;
+  store.autobot_settings = { ...(keptSettings || {}), soundOnComplete: false };
+  const task = (id, extra = {}) => ({ id, prompt: `Task ${id}`, title: `Task ${id}`, enabled: true, ...extra });
+
+  // No tab can be opened here, so every run ends as a failed one. What the
+  // run leaves in the list is what these checks look at.
+  store.autobot_schedules = [task("paused", { enabled: false })];
+  const byAlarm = await scheduler.runScheduledTask("paused");
+  check("an alarm does not run a paused task", byAlarm === null && !store.autobot_schedules[0].lastRunAt);
+  const manual = await scheduler.runScheduledTask("paused", { manual: true });
+  check('"Run now" runs a paused task', !!manual?.lastRunAt && !!store.autobot_schedules[0].lastRunAt, JSON.stringify(manual));
+  check("and leaves it paused", store.autobot_schedules[0].enabled === false);
+  check("both Run buttons ask for that", (swSrc.match(/runScheduledTask\(msg\.id, \{ manual: true \}\)/g) || []).length === 2);
+
+  store.autobot_schedules = [task("one")];
+  const running = scheduler.runScheduledTask("one");
+  // What the user does on the Settings page while that task is still running.
+  store.autobot_schedules = [task("one", { title: "Renamed meanwhile" }), task("two")];
+  const finished = await running;
+  const after = store.autobot_schedules;
+  check("a task added while another ran is still there", after.some((item) => item.id === "two"), JSON.stringify(after));
+  check("a change made to the running task is kept", after.find((item) => item.id === "one")?.title === "Renamed meanwhile", JSON.stringify(after));
+  check("and the result of the run is recorded with it", !!after.find((item) => item.id === "one")?.lastRunAt && finished?.title === "Renamed meanwhile", JSON.stringify(finished));
+
+  store.autobot_schedules = [task("gone")];
+  const doomed = scheduler.runScheduledTask("gone");
+  store.autobot_schedules = [];
+  const reported = await doomed;
+  check("a task deleted while it ran stays deleted", store.autobot_schedules.length === 0, JSON.stringify(store.autobot_schedules));
+  check("its result is still reported", !!reported?.lastStatus, JSON.stringify(reported));
+
+  store.autobot_schedules = keptSchedules;
+  store.autobot_settings = keptSettings;
+
+  // The Settings page stays open while the panel and running tasks save too.
+  const optionsSrc = fs.readFileSync(path.join(ROOT, "options/options.js"), "utf8");
+  const saves = (name) => (optionsSrc.match(new RegExp(`await ${name}\\(`, "g")) || []).length;
+  check(
+    "the Settings page saves into what is stored now, not into its old copy",
+    /async function updateSettings\(change\) \{\s*const latest = await getSettings\(\);\s*settings = change\(latest\);/.test(optionsSrc) &&
+      /providers = change\(await getProviders\(\)\);/.test(optionsSrc) &&
+      /skills = change\(await getSkills\(\)\);/.test(optionsSrc) &&
+      /savedPrompts = change\(await getSavedPrompts\(\)\);/.test(optionsSrc) &&
+      /schedules = change\(await getSchedules\(\)\);/.test(optionsSrc)
+  );
+  check(
+    "and nothing on it saves any other way",
+    ["saveSettings", "saveProviders", "saveSkills", "saveSavedPrompts", "saveSchedules"].every((name) => saves(name) === 1),
+    ["saveSettings", "saveProviders", "saveSkills", "saveSavedPrompts", "saveSchedules"].map((name) => `${name}:${saves(name)}`).join(" ")
+  );
+  check(
+    "a form saves only what was changed in it",
+    /const edits = editedFields\(form, shown\.agent\);/.test(optionsSrc) &&
+      /editedFields\(readOrchestratorForm\(\), shown\.orchestrator\)/.test(optionsSrc) &&
+      /orchestrator: \{ \.\.\.latest\.orchestrator, \.\.\.edits \}/.test(optionsSrc)
+  );
+  check(
+    "the page follows what is saved elsewhere",
+    ["autobot_settings", "autobot_providers", "autobot_skills", "autobot_saved_prompts", "autobot_schedules"].every((key) => optionsSrc.includes(`  ${key}: async () => {`)) &&
+      /if \(changes\[key\]\) follow\(\);/.test(optionsSrc)
+  );
+  check(
+    "but a form with input that is not saved yet is left alone",
+    /if \(sameValue\(readAgentForm\(\), shown\.agent\)\) renderAgentForm\(\);/.test(optionsSrc) &&
+      /if \(sameValue\(readPolicyForm\(\), shown\.policy\)\) renderPolicyForm\(\);/.test(optionsSrc) &&
+      /if \(sameValue\(checkedTools\(\), shown\.tools\)\) renderConfirmTools\(\);/.test(optionsSrc) &&
+      /if \(sameValue\(readOrchestratorForm\(\), shown\.orchestrator\)\) renderOrchestrator\(\);/.test(optionsSrc)
+  );
+}
+
 /* ---------- summary ---------- */
 console.log(`\n==== ${pass} passed, ${fail} failed ====`);
 process.exit(fail ? 1 : 0);
