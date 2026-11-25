@@ -297,6 +297,8 @@ select:focus { border-color: var(--blue); }
 .bubble p:last-child { margin-bottom: 0; }
 .bubble ul, .bubble ol { margin: 6px 0; padding-left: 20px; }
 .bubble li { margin: 2px 0; }
+.bubble h4 { margin: 10px 0 4px; font-size: 1em; font-weight: 600; }
+.bubble h4:first-child { margin-top: 0; }
 .bubble code {
   background: rgba(255, 255, 255, 0.08);
   padding: 1px 5px;

@@ -49,17 +49,26 @@ export async function syncAlarms() {
   return schedules;
 }
 
-export async function runScheduledTask(id) {
-  const schedules = await getSchedules();
-  const idx = schedules.findIndex((s) => s.id === id);
-  if (idx < 0) return null;
-  const s = schedules[idx];
-  if (!s.enabled) return null;
+// Writes a run's outcome into the list as it is now. The user may have added,
+// changed or deleted tasks while this one ran; a deleted task stays deleted.
+async function recordRun(id, outcome) {
+  const latest = await getSchedules();
+  if (!latest.some((item) => item.id === id)) return null;
+  const updated = latest.map((item) => (item.id === id ? { ...item, ...outcome } : item));
+  await saveSchedules(updated);
+  return updated.find((item) => item.id === id);
+}
+
+// `manual` is "Run now": it runs a paused task too. An alarm does not.
+export async function runScheduledTask(id, { manual = false } = {}) {
+  const s = (await getSchedules()).find((item) => item.id === id);
+  if (!s || (!s.enabled && !manual)) return null;
 
   let tabId = null;
   let createdTab = false;
   let result = null;
   let keepalive = null;
+  let outcome = null;
 
   try {
     // A copy whose name or logo was changed runs no tasks (shared/brand.js).
@@ -86,42 +95,41 @@ export async function runScheduledTask(id) {
       .reverse()
       .find((m) => m.role === "assistant" && m.content);
     const once = (s.repeatType || "interval") === "once";
-    schedules[idx] = {
-      ...s,
-      enabled: once ? false : s.enabled,
+    outcome = {
+      // A task that runs once is done after its run.
+      ...(once ? { enabled: false } : {}),
       lastRunAt: Date.now(),
       lastStatus: "ok",
       lastResult: String(final?.content || "(no answer)").slice(0, 2000),
     };
   } catch (e) {
-    schedules[idx] = {
-      ...s,
+    outcome = {
       lastRunAt: Date.now(),
       lastStatus: "error",
       lastResult: String(e?.message || e).slice(0, 2000),
     };
-  } finally {
-    if (keepalive) clearInterval(keepalive);
-    if (createdTab && schedules[idx]?.closeTab !== false && tabId != null) {
-      try {
-        await chrome.tabs.remove(tabId);
-      } catch {}
-    }
-    await saveSchedules(schedules);
-    const entry = schedules[idx];
-    try {
-      chrome.notifications.create(`autobot_task_${id}_${Date.now()}`, {
-        type: "basic",
-        iconUrl: chrome.runtime.getURL("icons/icon128.png"),
-        title: `Akron: ${s.title || "Scheduled task"}`,
-        message: String(entry?.lastResult || "").slice(0, 200) || "(no result)",
-      });
-    } catch {}
-    const notifySettings = await getSettings().catch(() => ({}));
-    if (notifySettings.soundOnComplete !== false) playChime();
   }
 
-  return schedules[idx];
+  if (keepalive) clearInterval(keepalive);
+  if (createdTab && s.closeTab !== false && tabId != null) {
+    try {
+      await chrome.tabs.remove(tabId);
+    } catch {}
+  }
+  const saved = await recordRun(id, outcome);
+  try {
+    chrome.notifications.create(`autobot_task_${id}_${Date.now()}`, {
+      type: "basic",
+      iconUrl: chrome.runtime.getURL("icons/icon128.png"),
+      title: `Akron: ${s.title || "Scheduled task"}`,
+      message: String(outcome.lastResult || "").slice(0, 200) || "(no result)",
+    });
+  } catch {}
+  const notifySettings = await getSettings().catch(() => ({}));
+  if (notifySettings.soundOnComplete !== false) playChime();
+
+  // The result is still reported for a task that was deleted while it ran.
+  return saved || { ...s, ...outcome };
 }
 
 export function installScheduler() {

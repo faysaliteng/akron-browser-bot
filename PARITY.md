@@ -71,7 +71,7 @@ object schema, and has a matching `executeTool` branch.
 | Tools confined to the group | ✅ | as in Claude, `list_tabs` shows only the task's own tabs and `switch_tab` refuses a tab outside the group; the user's other tabs are never read or taken over |
 | `find` sees plain text | ✅ | besides controls it returns visible text that is not inside a control (a mail row, a table cell) with a ref on the nearest clickable element |
 | Independent per-tab sessions | ✅ (➕) | new tab = fresh chat; same group = same chat; own task/stop/group |
-| Chat history list | ✅ (➕) | 🕘 corner list of every session; jump back to a chat |
+| Chat history list | ✅ (➕) | 🕘 corner list of every past chat; New chat, a closed tab and a browser restart keep the conversation, and it opens again in the panel you are in |
 | Claude-style light UI | ✅ | warm cream/coral theme across all pages |
 | Animated mark | ✅ (➕) | the Akron mark has a clear background (light and dark), moves in the header and on the welcome screen, and is a still picture when the system asks for reduced motion |
 | Attachments | ✅ | images + text, click / drag-drop / paste |
@@ -135,7 +135,7 @@ zero-backend MV3 extension is implemented.
 Run inside the extension folder:
 
 ```bash
-npm test              # 699 checks
+npm test              # 774 checks
 npm run check         # syntax-check every JS file
 npm run test:runtime  # real Chromium end-to-end test
 ```
@@ -143,7 +143,7 @@ npm run test:runtime  # real Chromium end-to-end test
 Last run of `npm test`:
 
 ```
-==== 699 passed, 0 failed ====
+==== 774 passed, 0 failed ====
 ```
 
 Last run of `npm run test:runtime` (real Chromium, unpacked extension):

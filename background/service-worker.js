@@ -7,7 +7,6 @@ import {
   clearConversation,
   getSessionConversation,
   saveSessionConversation,
-  clearSessionConversation,
   getSkills,
   saveSkills,
   getSchedules,
@@ -35,6 +34,7 @@ import {
   resultsReport,
 } from "../shared/results.js";
 import { createConfirmQueue } from "./confirms.js";
+import { fileChat, fileTabChats, isChatId, listChats, plainPreview, readChat, removeChat } from "./chat-store.js";
 import {
   startRecording as gifStart,
   stopRecording as gifStop,
@@ -304,8 +304,28 @@ function sessionForPort(port) {
   return session;
 }
 
+const CHATS_FILED_FLAG = "autobot_chats_filed";
+
+// A chat is kept under its tab's id, and tab ids start over when the browser
+// starts. Once per browser start (or reload of the extension) the chats whose
+// tab is gone are moved to the history; a tab that is still open keeps its
+// chat. The flag lives in session storage, which is emptied at both moments.
+async function fileStaleChats() {
+  const flags = chrome.storage.session;
+  if (!flags || (await flags.get(CHATS_FILED_FLAG))[CHATS_FILED_FLAG]) return;
+  const [tabs, windows] = await Promise.all([chrome.tabs.query({}), chrome.windows.getAll()]);
+  const open = new Set([...tabs.map((tab) => `t${tab.id}`), ...windows.map((win) => `w${win.id}`)]);
+  await fileTabChats((id) => open.has(id));
+  await flags.set({ [CHATS_FILED_FLAG]: true });
+}
+
+// Chats are read only after this is done. A failed move leaves them where
+// they were, still listed in the history; the next start tries again.
+const staleChatsFiled = fileStaleChats().catch(() => {});
+
 async function ensureLoaded(session) {
   if (session.loaded) return;
+  await staleChatsFiled;
   let conversation = await getSessionConversation(session.id);
   if (!conversation.length) {
     // One-time migration from the single-conversation version.
@@ -323,7 +343,40 @@ async function ensureLoaded(session) {
     : [];
   session.groupTitle = settings.groupTitle || "Akron";
   await loadSessionMeta(session);
+  if (!conversation.length) {
+    // A chat without messages has no name yet: whatever was stored with it
+    // belongs to an earlier chat.
+    session.title = null;
+    session.preview = null;
+    session.results = [];
+  }
   session.loaded = true;
+}
+
+// Ends the session's chat: it goes to the history under an id of its own and
+// the session is left empty for the next one. Nothing is deleted.
+async function putChatAside(session) {
+  await ensureLoaded(session);
+  if (session.conversation.length) {
+    await saveSessionConversation(session.id, session.conversation);
+    await saveSessionMeta(session);
+  }
+  await fileChat(session.id);
+  session.conversation = [];
+  session.results = [];
+  session.title = null;
+  session.preview = null;
+  session.createdAt = Date.now();
+  session.updatedAt = session.createdAt;
+  await saveSessionMeta(session);
+}
+
+// Takes a session out of memory. What it stored stays where it is.
+function forgetSession(session) {
+  sessions.delete(session.id);
+  for (const [tabId, id] of [...tabSessions]) {
+    if (id === session.id) tabSessions.delete(tabId);
+  }
 }
 
 function sessionMetaKey(sessionId) {
@@ -587,56 +640,92 @@ async function clearSeenGroupMark(tabId) {
   else await chrome.tabGroups.update(groupId, { title: plainGroupTitle(shown) }).catch(() => {});
 }
 
-function historyEntry(session) {
-  return {
-    id: session.id,
-    title: session.title || "New chat",
-    preview: session.preview || "",
-    createdAt: session.createdAt || Date.now(),
-    updatedAt: session.updatedAt || Date.now(),
-    tabId: session.tabId ?? null,
-    groupId: session.groupId ?? null,
-    groupTitle: session.groupTitle || "Akron",
-  };
+/* ---------------------------- chat history ---------------------------- */
+
+// The history as one panel sees it: every stored chat, its own one marked.
+async function chatHistory(port) {
+  await staleChatsFiled;
+  const currentId = sessionForPort(port).id;
+  const chats = await listChats();
+  return chats.map((chat) => ({ ...chat, current: chat.id === currentId }));
 }
 
-async function listSessions() {
-  const out = [];
-  const seen = new Set();
-  for (const session of sessions.values()) {
-    if (seen.has(session.id)) continue;
-    seen.add(session.id);
-    out.push(historyEntry(session));
+// The tab whose panel shows the session, or else the tab its task works in.
+function tabShowing(session) {
+  for (const [port, bound] of ports) {
+    const tabId = bound === session ? panelTabId(port.sender?.url) : null;
+    if (Number.isInteger(tabId)) return tabId;
   }
-  try {
-    const all = await chrome.storage.local.get(null);
-    const prefix = "autobot_session_meta_";
-    for (const [key, meta] of Object.entries(all)) {
-      if (!key.startsWith(prefix)) continue;
-      const id = key.slice(prefix.length);
-      if (seen.has(id)) continue;
-      seen.add(id);
-      if (!meta || typeof meta !== "object") continue;
-      out.push({
-        id,
-        title: meta.title || "New chat",
-        preview: meta.preview || "",
-        createdAt: Number.isInteger(meta.createdAt) ? meta.createdAt : null,
-        updatedAt: Number.isInteger(meta.updatedAt) ? meta.updatedAt : null,
-        tabId: Number.isInteger(meta.tabId) ? meta.tabId : null,
-        groupId: Number.isInteger(meta.groupId) ? meta.groupId : null,
-        groupTitle: meta.groupTitle || "Akron",
-      });
-    }
-  } catch {}
-  out.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-  return out;
+  return Number.isInteger(session.targetTabId) ? session.targetTabId : session.tabId;
 }
 
-async function loadSessionFromStorage(id) {
-  const session = sessionById(id, null, null);
-  await loadSessionMeta(session);
-  return session;
+async function goToTab(tabId) {
+  const tab = Number.isInteger(tabId) ? await chrome.tabs.get(tabId).catch(() => null) : null;
+  if (!tab) return false;
+  await chrome.tabs.update(tabId, { active: true });
+  if (tab.windowId != null) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  return true;
+}
+
+// Puts a stored chat into the session, in place of the one it had.
+async function adoptChat(session, chat) {
+  await releaseSessionGroup(session);
+  await putChatAside(session);
+  session.conversation = chat.conversation;
+  session.results = cleanResults(chat.meta.results);
+  session.title = chat.meta.title || null;
+  session.preview = chat.meta.preview || null;
+  session.createdAt = Number.isInteger(chat.meta.createdAt) ? chat.meta.createdAt : Date.now();
+  session.updatedAt = Number.isInteger(chat.meta.updatedAt) ? chat.meta.updatedAt : Date.now();
+  // Written under the session's id first, removed from the old place after.
+  await saveSessionConversation(session.id, session.conversation);
+  await saveSessionMeta(session);
+  await removeChat(chat.id);
+}
+
+// Opens a past chat in the panel that asked for it. A chat that is at work, or
+// on show in another tab's panel, is not taken away: the user is brought to it.
+async function openChat(port, chatId) {
+  const session = sessionForPort(port);
+  if (!isChatId(chatId) || chatId === session.id) return;
+  const live = sessions.get(chatId);
+  if (live && (live.running || sessionHasPanel(live))) {
+    if (!(await goToTab(tabShowing(live)))) {
+      port.postMessage({ type: "error", retry: false, message: "That chat is in use in another panel. Open it there." });
+    }
+    return;
+  }
+  if (session.running) {
+    port.postMessage({ type: "error", retry: false, message: "Wait for the current task to finish before opening another chat." });
+    return;
+  }
+  // Its group goes first: that saves the chat's record one last time.
+  if (live && live.groupId != null) await releaseSessionGroup(live);
+  const chat = await readChat(chatId);
+  if (!chat) {
+    await removeChat(chatId);
+    port.postMessage({ type: "error", retry: false, message: "That chat is no longer stored in this browser." });
+    port.postMessage({ type: "sessions", sessions: await chatHistory(port) });
+    return;
+  }
+  await adoptChat(session, chat);
+  if (live) forgetSession(live);
+  broadcastToSession(session, { type: "cleared" });
+  broadcastToSession(session, await stateMessage(session));
+}
+
+async function stateMessage(session) {
+  const [settings, providers] = await Promise.all([getSettings(), getProviders()]);
+  return {
+    type: "state",
+    conversation: session.conversation,
+    settings,
+    providers: providers.map(publicProvider),
+    orchestrator: summarizePool(providers, settings),
+    running: session.running,
+    session: publicSession(session),
+    group: await sessionGroupState(session),
+  };
 }
 
 /* --------------------------- live model list --------------------------- */
@@ -800,8 +889,11 @@ function requestConfirm(session, payload) {
   else notifyNeedsUser(session);
   confirmQueue.setVisible(session.id, shown);
   setNeedsInput(session, true);
-  // The answer does not wait for the title to be rewritten.
+  // The answer does not wait for the title to be rewritten. A panel that
+  // still shows the request is told it is settled: it may have been answered
+  // by Stop, or by nobody in time.
   return promise.finally(() => {
+    broadcastToSession(session, { type: "confirm_closed", id: request.id });
     setNeedsInput(session, confirmQueue.requestsFor(session.id).length > 0);
   });
 }
@@ -908,6 +1000,7 @@ async function handleUserMessage(msg, port, session) {
   if (session.running) {
     port.postMessage({
       type: "error",
+      retry: false,
       message: "This window's Akron is already working. Press Stop first.",
     });
     return;
@@ -918,7 +1011,7 @@ async function handleUserMessage(msg, port, session) {
 
   // A copy whose name or logo was changed takes no tasks (shared/brand.js).
   if ((await brandProblems()).length) {
-    port.postMessage({ type: "error", message: BRAND_BLOCKED_MESSAGE });
+    port.postMessage({ type: "error", retry: false, message: BRAND_BLOCKED_MESSAGE });
     return;
   }
 
@@ -1162,7 +1255,7 @@ async function handleUserMessage(msg, port, session) {
     // The history list and the notification are seen outside the chat: they
     // never carry a collected value.
     const outsideLine = lastAssistant
-      ? previewWithoutResults(lastAssistant.content, session.results)
+      ? plainPreview(previewWithoutResults(lastAssistant.content, session.results))
       : "";
     if (lastAssistant) session.preview = outsideLine.slice(0, 140);
     session.updatedAt = Date.now();
@@ -1231,20 +1324,7 @@ chrome.runtime.onConnect.addListener((port) => {
         case "get_state": {
           const session = sessionForPort(port);
           await ensureLoaded(session);
-          const [settings, providers] = await Promise.all([
-            getSettings(),
-            getProviders(),
-          ]);
-          port.postMessage({
-            type: "state",
-            conversation: session.conversation,
-            settings,
-            providers: providers.map(publicProvider),
-            orchestrator: summarizePool(providers, settings),
-            running: session.running,
-            session: publicSession(session),
-            group: await sessionGroupState(session),
-          });
+          port.postMessage(await stateMessage(session));
           break;
         }
         case "user_message":
@@ -1283,18 +1363,16 @@ chrome.runtime.onConnect.addListener((port) => {
           if (session.running) {
             port.postMessage({
               type: "error",
+              retry: false,
               message: "Wait for the current task to finish before clearing.",
             });
             break;
           }
           // New chat = new session. Release the old group so the next task
-          // creates a fresh group, like starting a new Claude session.
+          // creates a fresh group, like starting a new Claude session. The
+          // chat that ends here stays in the history.
           await releaseSessionGroup(session);
-          session.conversation = [];
-          session.results = [];
-          session.loaded = true;
-          await clearSessionConversation(session.id);
-          await saveSessionMeta(session);
+          await putChatAside(session);
           broadcastToSession(session, { type: "cleared" });
           break;
         }
@@ -1303,6 +1381,7 @@ chrome.runtime.onConnect.addListener((port) => {
           if (session.running) {
             port.postMessage({
               type: "error",
+              retry: false,
               message: "Stop the current task before releasing the tab group.",
             });
             break;
@@ -1311,7 +1390,7 @@ chrome.runtime.onConnect.addListener((port) => {
           break;
         }
         case "run_schedule_now": {
-          const result = await runScheduledTask(msg.id);
+          const result = await runScheduledTask(msg.id, { manual: true });
           port.postMessage({ type: "schedule_result", id: msg.id, result });
           break;
         }
@@ -1325,34 +1404,11 @@ chrome.runtime.onConnect.addListener((port) => {
           break;
         }
         case "list_sessions": {
-          port.postMessage({ type: "sessions", sessions: await listSessions() });
+          port.postMessage({ type: "sessions", sessions: await chatHistory(port) });
           break;
         }
         case "open_session": {
-          const targetId = String(msg.id || "");
-          if (!targetId) break;
-          const existing = sessions.get(targetId) || (await loadSessionFromStorage(targetId));
-          const tabId = existing?.tabId;
-          if (Number.isInteger(tabId)) {
-            const tab = await chrome.tabs.get(tabId).catch(() => null);
-            if (tab) {
-              await chrome.tabs.update(tabId, { active: true });
-              if (tab.windowId != null) {
-                await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
-              }
-              break;
-            }
-          }
-          // Tab is gone; show this conversation in the current panel.
-          const session = existing || sessionById(targetId, sessionForPort(port).windowId, null);
-          bindPort(port, session);
-          await ensureLoaded(session);
-          port.postMessage({
-            type: "session",
-            session: publicSession(session),
-            group: await groupInfo(session),
-          });
-          showPendingConfirms(port, session);
+          await openChat(port, String(msg.id || ""));
           break;
         }
         case "list_models": {
@@ -1454,7 +1510,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     try {
       if (type === "run_schedule_now") {
-        sendResponse({ ok: true, result: await runScheduledTask(msg.id) });
+        sendResponse({ ok: true, result: await runScheduledTask(msg.id, { manual: true }) });
       } else if (type === "list_schedules") {
         sendResponse({ ok: true, schedules: await getSchedules() });
       } else if (type === "transcribe_audio") {
@@ -1585,9 +1641,8 @@ chrome.commands.onCommand.addListener((command) => {
     } else if (command === "focus-side-panel") {
       openSidePanel(tab.id);
     } else if (command === "stop-task") {
-      sessionForTab(tab.id, tab.windowId).then((session) => {
-        if (session.abortController) session.abortController.abort();
-      });
+      // Also answers an approval the task is waiting for, like the Stop button.
+      sessionForTab(tab.id, tab.windowId).then((session) => stopSession(session));
     }
   });
 });
