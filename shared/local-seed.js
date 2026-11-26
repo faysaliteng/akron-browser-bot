@@ -5,6 +5,8 @@
 //   {
 //     "version": 2,
 //     "providers": [{ id, name, type, baseUrl, apiKey, models, defaultModel, ... }],
+//                                            // "replace": true makes the file's key,
+//                                            // address and models overwrite stored ones
 //     "orchestrator": {                      // optional
 //       "enabled": true,
 //       "endpoints": [{ "providerId": "...", "model": "..." }]
@@ -62,8 +64,20 @@ export function applyLocalSeed({ seed, providers, settings }) {
   for (const incoming of seedProviders(seed)) {
     const index = nextProviders.findIndex((provider) => provider.id === incoming.id);
     if (index === -1) {
-      nextProviders = [...nextProviders, { ...incoming }];
+      const { replace: _replace, ...added } = incoming;
+      nextProviders = [...nextProviders, added];
       providersChanged = true;
+    } else if (incoming.replace === true) {
+      // "replace": the file's key, address and models win over what is stored,
+      // e.g. after the proxy's key was renewed. The user's other settings stay.
+      const { replace: _replace, ...fromFile } = incoming;
+      const pick = ["apiKey", "apiKeys", "baseUrl", "models", "defaultModel"];
+      const update = Object.fromEntries(pick.filter((key) => key in fromFile).map((key) => [key, fromFile[key]]));
+      const current = nextProviders[index];
+      if (pick.some((key) => key in update && JSON.stringify(current[key]) !== JSON.stringify(update[key]))) {
+        nextProviders = nextProviders.map((provider, i) => (i === index ? { ...provider, ...update } : provider));
+        providersChanged = true;
+      }
     } else if (!nextProviders[index].apiKey && incoming.apiKey) {
       nextProviders = nextProviders.map((provider, i) =>
         i === index ? { ...provider, apiKey: incoming.apiKey } : provider

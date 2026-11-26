@@ -2326,6 +2326,18 @@ console.log("\n[local seed]");
   const same = applyLocalSeed({ seed: { providers: [stored[0]] }, providers: stored, settings });
   check("nothing is rewritten when the seed adds nothing", same.providersChanged === false && same.providers.length === 1);
   check("a missing or malformed seed is harmless", applyLocalSeed({ seed: null, providers: stored, settings }).providers.length === 1);
+  // A renewed proxy key: "replace" lets the file's key and models win.
+  const proxyStored = [{ id: "proxy", name: "My proxy name", baseUrl: "http://localhost:3001/v1", apiKey: "old-test-key", models: ["a"], maxTokens: 8000 }];
+  const renewed = { providers: [{ id: "proxy", name: "File name", baseUrl: "http://localhost:3001/v1", apiKey: "new-test-key", apiKeys: [], models: ["auto", "b"], defaultModel: "auto", replace: true }] };
+  const replaced = applyLocalSeed({ seed: renewed, providers: proxyStored, settings: {} });
+  const proxy = replaced.providers[0];
+  check("a seed marked replace puts its new key in", replaced.providersChanged && proxy.apiKey === "new-test-key", JSON.stringify(proxy));
+  check("and its models", JSON.stringify(proxy.models) === '["auto","b"]' && proxy.defaultModel === "auto");
+  check("but keeps what the user set otherwise", proxy.name === "My proxy name" && proxy.maxTokens === 8000 && !("replace" in proxy), JSON.stringify(proxy));
+  check("the old key is never kept as a spare", !JSON.stringify(proxy).includes("old-test-key"));
+  check("applying it again changes nothing", applyLocalSeed({ seed: renewed, providers: replaced.providers, settings: {} }).providersChanged === false);
+  check("without replace a stored key stays", applyLocalSeed({ seed: { providers: [{ ...renewed.providers[0], replace: false }] }, providers: proxyStored, settings: {} }).providers[0].apiKey === "old-test-key");
+  check("a new provider is stored without the replace mark", !("replace" in applyLocalSeed({ seed: renewed, providers: [], settings: {} }).providers[0]));
   check("the worker applies the seed through this module", swSrc.includes("applyLocalSeed({") && swSrc.includes('from "../shared/local-seed.js"'));
 }
 
