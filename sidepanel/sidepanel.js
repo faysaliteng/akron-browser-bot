@@ -556,6 +556,22 @@ function setRunning(value) {
   }
 }
 
+// A model can take a while to answer. After a few silent seconds the status
+// line counts them, so a slow answer is not taken for a panel that froze.
+const QUIET_BEFORE_COUNTING_MS = 8000;
+let lastWordAt = Date.now();
+
+function showWait() {
+  const quiet = Date.now() - lastWordAt;
+  const waiting = running && !pendingConfirmId && !listening;
+  if (waiting && quiet >= QUIET_BEFORE_COUNTING_MS) {
+    typingText.dataset.wait = ` · ${Math.round(quiet / 1000)}s`;
+  } else {
+    delete typingText.dataset.wait;
+  }
+}
+setInterval(showWait, 1000);
+
 // One line under the status with the latest of the model's thinking.
 function showThinking(text) {
   const clean = String(text || "").trim();
@@ -1481,6 +1497,8 @@ function dismissConfirm() {
 /* ---------------------------- messages ---------------------------- */
 
 function onMessage(msg) {
+  lastWordAt = Date.now();
+  showWait();
   switch (msg?.type) {
     case "state": {
       if (

@@ -135,7 +135,7 @@ zero-backend MV3 extension is implemented.
 Run inside the extension folder:
 
 ```bash
-npm test              # 774 checks
+npm test              # 786 checks
 npm run check         # syntax-check every JS file
 npm run test:runtime  # real Chromium end-to-end test
 ```
@@ -143,7 +143,7 @@ npm run test:runtime  # real Chromium end-to-end test
 Last run of `npm test`:
 
 ```
-==== 774 passed, 0 failed ====
+==== 786 passed, 0 failed ====
 ```
 
 Last run of `npm run test:runtime` (real Chromium, unpacked extension):

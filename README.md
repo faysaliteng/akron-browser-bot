@@ -457,7 +457,7 @@ onboarding/                   first-run welcome page
 offscreen/                    GIF89a encoder (LZW), chime, worker keep-alive, local speech model (in its own thread)
 _locales/                     en, de, es, fr, ja, zh_CN manifest strings
 tools/seal-brand.mjs          renews the logo fingerprints after the owner changes the logo
-tests/                        node test suite (774 checks)
+tests/                        node test suite (786 checks)
 ```
 
 **Flow**
@@ -477,7 +477,7 @@ tests/                        node test suite (774 checks)
 ## Verification
 
 ```bash
-npm test              # 774 checks, 0 failures
+npm test              # 786 checks, 0 failures
 npm run test:live     # optional real NVIDIA/DeepSeek run; skips if the env keys are absent
 npm run check         # syntax-check every JS file
 npm run test:runtime  # real Chromium end-to-end test (61 checks)
