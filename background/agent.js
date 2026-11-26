@@ -63,6 +63,55 @@ function withDeadline(signal, ms) {
   };
 }
 
+// A provider can accept a request and then send nothing. Without a limit the
+// task would wait for it forever, with "Thinking…" as its last word. After
+// this long without a sign of life the call is given up as a passing failure:
+// the next endpoint is tried, or the same one is asked again.
+const MODEL_STALL_MS = 120000; // between two pieces of a streamed answer
+const MODEL_REPLY_MS = 300000; // for an answer that comes in one piece
+// With other endpoints to turn to (orchestrator mode), silence is waited out
+// for half as long before the next one is asked.
+const POOL_PATIENCE = 0.5;
+// A lone endpoint that stays silent is asked this many times, then the task
+// ends and says so.
+const MAX_STALLED_TRIES = 2;
+
+/**
+ * Watches one model call. `signal` aborts when the task is stopped or when
+ * nothing arrived for `ms`. `expired` rejects in the second case, so a call
+ * that does not react to the abort cannot hold the task either. `touch()` is
+ * the sign of life: it starts the wait again.
+ */
+function stallWatch(signal, ms) {
+  const controller = new AbortController();
+  let timer = null;
+  let giveUp = () => {};
+  const expired = new Promise((_resolve, reject) => {
+    giveUp = reject;
+  });
+  const arm = (limit = ms) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const error = new Error(`timed out: no answer for ${Math.round(limit / 1000)}s`);
+      error.stalled = true;
+      giveUp(error);
+      controller.abort();
+    }, limit);
+  };
+  const stop = () => controller.abort();
+  signal?.addEventListener?.("abort", stop, { once: true });
+  arm();
+  return {
+    signal: controller.signal,
+    expired,
+    touch: arm,
+    clear: () => {
+      clearTimeout(timer);
+      signal?.removeEventListener?.("abort", stop);
+    },
+  };
+}
+
 function normalizePool({ endpoints, providerConfig, model }) {
   if (Array.isArray(endpoints) && endpoints.length) {
     return endpoints
@@ -206,6 +255,8 @@ export async function runTurn({
   persist = async () => {},
   wait = pauseUnlessStopped,
   summaryTimeoutMs = SUMMARY_TIMEOUT_MS,
+  stallMs = MODEL_STALL_MS,
+  replyMs = MODEL_REPLY_MS,
   results = [],
   onResults = async () => {},
 }) {
@@ -268,18 +319,33 @@ export async function runTurn({
   const usedTools = [];
   let currentId = null;
 
+  // One model call under watch: it ends with an answer, with the provider's
+  // error, or because nothing came for too long.
   async function callEndpoint(endpoint, { streamId }) {
     const provider = createProvider(endpoint.providerConfig);
+    const wantStream =
+      settings.streaming !== false && typeof provider.chatStream === "function";
+    const patience = (wantStream ? stallMs : replyMs) * (multi ? POOL_PATIENCE : 1);
+    const watch = stallWatch(signal, patience);
+    try {
+      return await Promise.race([
+        askEndpoint(endpoint, provider, { streamId, wantStream, watch }),
+        watch.expired,
+      ]);
+    } finally {
+      watch.clear();
+    }
+  }
+
+  async function askEndpoint(endpoint, provider, { streamId, wantStream, watch }) {
     const callOpts = {
       messages: conversation,
       tools: TOOL_DEFS,
       system: await systemNow(),
       model: endpoint.model,
-      signal,
+      signal: watch.signal,
       settings,
     };
-    const wantStream =
-      settings.streaming !== false && typeof provider.chatStream === "function";
     let streamed = "";
 
     if (!wantStream) {
@@ -295,6 +361,8 @@ export async function runTurn({
     try {
       const res = await provider.chatStream({
         ...callOpts,
+        // Every piece that arrives, a tool call's included, is a sign of life.
+        onActivity: () => watch.touch(),
         onDelta: (delta) => {
           if (!delta) return;
           streamed += delta;
@@ -319,6 +387,7 @@ export async function runTurn({
           step,
           text: `Streaming returned no text from ${endpoint.label}; retrying…`,
         });
+        watch.touch(replyMs);
         const fallback = await provider.chat(callOpts);
         return { res: fallback, streamed: false, endpoint };
       }
@@ -344,6 +413,7 @@ export async function runTurn({
         text: `Streaming unavailable from ${endpoint.label}; retrying without streaming…`,
       });
       try {
+        watch.touch(replyMs);
         const fallback = await provider.chat(callOpts);
         if (streamed) emit({ type: "stream_reset", streamId });
         return { res: fallback, streamed: false, endpoint };
@@ -437,6 +507,7 @@ export async function runTurn({
       }: ${describeError(lastError)}`
     );
     failed.transient = sawTransient;
+    failed.stalled = !!lastError?.stalled;
     failed.retryAfterMs = multi
       ? transientCooldownRemaining(pool)
       : Number(lastError?.retryAfterMs) || 0;
@@ -452,7 +523,9 @@ export async function runTurn({
         return await callWithFailover(streamId);
       } catch (error) {
         if (signal.aborted || error?.name === "AbortError") throw error;
-        const waitMs = error?.transient
+        // Silence is waited out only so often: each try costs minutes.
+        const silentTooOften = error?.stalled && attempt >= MAX_STALLED_TRIES;
+        const waitMs = error?.transient && !silentTooOften
           ? transientRetryDelay({ attempt, retryAfterMs: error.retryAfterMs, maxRetries })
           : null;
         if (waitMs == null) throw error;

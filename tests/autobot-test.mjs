@@ -3256,6 +3256,132 @@ console.log("\n[one place does not undo what another saved]");
   );
 }
 
+/* ---------- a model call that is never answered ---------- */
+console.log("\n[a provider that stops answering does not hold a task forever]");
+{
+  const realFetch = globalThis.fetch;
+  const within = (promise, ms) =>
+    Promise.race([
+      promise.then((value) => ({ value }), (error) => ({ error })),
+      new Promise((resolve) => setTimeout(() => resolve({ hung: true }), ms)),
+    ]);
+  // A request that is accepted and then never answered. It ends only when cancelled.
+  const neverAnswers = (_url, init) =>
+    new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+    });
+  const answer = (text) => ({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: text }, finish_reason: "stop" }] }), text: async () => "" });
+  const turn = (extra = {}) => {
+    const events = [];
+    const conversation = [{ role: "user", content: "go" }];
+    const run = runTurn({
+      conversation,
+      settings: { streaming: false },
+      providerConfig: { type: "openai", name: "Slow", baseUrl: "https://api.openai.com/v1", apiKey: "k" },
+      model: "gpt-x",
+      tabId: 1,
+      signal: new AbortController().signal,
+      emit: (e) => events.push(e),
+      wait: async () => {},
+      stallMs: 40,
+      replyMs: 40,
+      ...extra,
+    });
+    return { run, events, conversation };
+  };
+  const message = (end) => String(end.error?.message || "");
+
+  let calls = 0;
+  globalThis.fetch = (url, init) => {
+    calls += 1;
+    return neverAnswers(url, init);
+  };
+  const dead = turn();
+  const deadEnd = await within(dead.run, 3000);
+  check("a call that is never answered ends", !deadEnd.hung, "still waiting after 3 s");
+  check("the task ends saying so", /no answer in time/.test(message(deadEnd)), message(deadEnd) || JSON.stringify(deadEnd));
+  check("after asking a second time", calls === 2, `calls=${calls}`);
+  check("the panel is told while it asks again", dead.events.some((e) => e.type === "status" && /no answer in time/.test(e.text || "")), JSON.stringify(dead.events.map((e) => e.text || e.type)));
+
+  calls = 0;
+  globalThis.fetch = (url, init) => (++calls === 1 ? neverAnswers(url, init) : Promise.resolve(answer("Back again.")));
+  const recovered = turn();
+  const recoveredEnd = await within(recovered.run, 3000);
+  check("a provider that answers the second time carries the task on", !recoveredEnd.hung && recovered.conversation.at(-1)?.content === "Back again.", JSON.stringify(recoveredEnd));
+
+  // A request that does not even react to being cancelled.
+  globalThis.fetch = () => new Promise(() => {});
+  const deaf = await within(turn().run, 3000);
+  check("a call that ignores being cancelled ends too", !deaf.hung && /no answer in time/.test(message(deaf)), message(deaf) || JSON.stringify(deaf));
+
+  const stopper = new AbortController();
+  globalThis.fetch = neverAnswers;
+  const halted = turn({ signal: stopper.signal, stallMs: 5000, replyMs: 5000 });
+  setTimeout(() => stopper.abort(), 30);
+  const haltedEnd = await within(halted.run, 3000);
+  check("Stop still ends the task at once, as a stop", !haltedEnd.hung && !!haltedEnd.error && !/no answer/.test(message(haltedEnd)), message(haltedEnd) || JSON.stringify(haltedEnd));
+
+  // Orchestrator mode: a silent endpoint counts as a failed one, and the next
+  // endpoint is asked, after half the wait a lone endpoint would get.
+  const asked = [];
+  globalThis.fetch = (url, init) => {
+    asked.push(new URL(url).host);
+    return String(url).includes("quiet.example") ? neverAnswers(url, init) : Promise.resolve(answer("From the other one."));
+  };
+  const endpoint = (id, host) => ({ id, providerId: id, providerName: id, model: `model-${id}`, providerConfig: { type: "openai", name: id, baseUrl: `https://${host}/v1`, apiKey: "k" } });
+  const pooled = turn({
+    endpoints: [endpoint("quiet-endpoint", "quiet.example"), endpoint("awake-endpoint", "awake.example")],
+    settings: { streaming: false, orchestrator: { enabled: true } },
+    stallMs: 400,
+    replyMs: 400,
+  });
+  const pooledStarted = Date.now();
+  const pooledEnd = await within(pooled.run, 3000);
+  const pooledTook = Date.now() - pooledStarted;
+  check("with a pool, a silent endpoint is left for the next one", !pooledEnd.hung && pooled.conversation.at(-1)?.content === "From the other one.", message(pooledEnd) || JSON.stringify(pooledEnd));
+  check("the other endpoint is asked right after the silent one", asked.join(",") === "quiet.example,awake.example", asked.join(","));
+  check("the switch is reported with its reason", pooled.events.some((e) => e.type === "orchestrator_failover" && e.reason === "no answer in time" && /awake-endpoint/.test(e.to || "")), JSON.stringify(pooled.events.filter((e) => e.type === "orchestrator_failover")));
+  check("and it comes after half the wait of a lone endpoint", pooledTook >= 180 && pooledTook < 380, `${pooledTook} ms`);
+  orch.resetCooldowns();
+
+  // An answer that keeps coming is never cut off, however long it takes in
+  // all: here a tool call and then text, each piece well inside the limit.
+  const sse = (events, gapMs) => ({
+    ok: true,
+    status: 200,
+    body: {
+      getReader() {
+        let sent = 0;
+        return {
+          async read() {
+            if (sent >= events.length) return { done: true, value: undefined };
+            await new Promise((resolve) => setTimeout(resolve, gapMs));
+            return { done: false, value: new TextEncoder().encode(`data: ${events[sent++]}\n\n`) };
+          },
+        };
+      },
+    },
+  });
+  const piece = (delta) => JSON.stringify({ choices: [{ delta }] });
+  const slowCall = [
+    piece({ tool_calls: [{ index: 0, id: "c1", function: { name: "wait", arguments: "" } }] }),
+    ...['{"m', 's"', ":", "1", "}"].map((part) => piece({ tool_calls: [{ index: 0, function: { arguments: part } }] })),
+    "[DONE]",
+  ];
+  const slowText = [...["Slow ", "but ", "there."].map((part) => piece({ content: part })), "[DONE]"];
+  const streams = [slowCall, slowText];
+  globalThis.fetch = async () => sse(streams.shift(), 30);
+  const steady = turn({ settings: { streaming: true }, stallMs: 90, replyMs: 90 });
+  const steadyEnd = await within(steady.run, 5000);
+  check(
+    "an answer that keeps coming is not cut off",
+    !steadyEnd.hung && !steadyEnd.error && steady.conversation.at(-1)?.content === "Slow but there." && steady.conversation.some((m) => m.role === "tool" && m.name === "wait"),
+    message(steadyEnd) || JSON.stringify(steady.conversation.map((m) => `${m.role}:${String(m.content).slice(0, 30)}`))
+  );
+
+  globalThis.fetch = realFetch;
+}
+
 /* ---------- summary ---------- */
 console.log(`\n==== ${pass} passed, ${fail} failed ====`);
 process.exit(fail ? 1 : 0);

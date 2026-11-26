@@ -208,6 +208,8 @@ export function describeError(error) {
   }
   if (status === 529) return "provider overloaded";
   if (status >= 500) return `server error ${status}`;
+  // The request was accepted and then nothing came back (agent.js stallWatch).
+  if (error?.stalled) return "no answer in time";
   if (status === 0) return "network error";
   return String(error?.message || error || "request failed").slice(0, 160);
 }

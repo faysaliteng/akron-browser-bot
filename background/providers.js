@@ -575,7 +575,9 @@ async function geminiChat({ config, messages, tools, system, model, signal, sett
 /* Streaming                                                           */
 /* ------------------------------------------------------------------ */
 
-async function readSSE(res, onData) {
+// `onActivity` is called for every event that arrives, whatever is in it: the
+// caller uses it to tell an answer that is still coming from one that stopped.
+async function readSSE(res, onData, onActivity) {
   if (!res.body || typeof res.body.getReader !== "function") {
     const text = await res.text();
     for (const line of text.split(/\r?\n/)) {
@@ -602,6 +604,7 @@ async function readSSE(res, onData) {
       const d = line.slice(5).trim();
       if (!d) continue;
       if (d === "[DONE]") return;
+      onActivity?.();
       onData(d);
     }
   }
@@ -616,6 +619,7 @@ async function anthropicChatStream({
   signal,
   settings,
   onDelta,
+  onActivity,
 }) {
   const body = {
     model,
@@ -677,7 +681,7 @@ async function anthropicChatStream({
     } else if (ev.type === "message_delta" && ev.delta?.stop_reason) {
       stopReason = ev.delta.stop_reason;
     }
-  });
+  }, onActivity);
 
   const toolCalls = [];
   for (const tb of toolBlocks.values()) {
@@ -703,6 +707,7 @@ async function openaiChatStream({
   settings,
   onDelta,
   onThinking,
+  onActivity,
   imagesStripped = false,
   reasoningStripped = false,
 }) {
@@ -758,6 +763,7 @@ async function openaiChatStream({
         settings,
         onDelta,
         onThinking,
+        onActivity,
         imagesStripped,
         reasoningStripped: true,
       });
@@ -775,6 +781,7 @@ async function openaiChatStream({
         settings,
         onDelta,
         onThinking,
+        onActivity,
         imagesStripped: true,
       });
       retried.text = `This model cannot view images, so the picture was left out. ${retried.text || ""}`.trim();
@@ -828,7 +835,7 @@ async function openaiChatStream({
     }
 
     if (choice.finish_reason) stopReason = choice.finish_reason;
-  });
+  }, onActivity);
 
   const toolCalls = [...calls.values()]
     .filter((c) => c.name)
@@ -859,6 +866,7 @@ async function geminiChatStream({
   settings,
   onDelta,
   onThinking,
+  onActivity,
 }) {
   const base = config.baseUrl || "https://generativelanguage.googleapis.com/v1beta";
   const url = joinUrl(
@@ -921,7 +929,7 @@ async function geminiChatStream({
     if (chunk.reasoning) onThinking?.(chunk.reasoning);
     toolCalls.push(...chunk.toolCalls);
     if (cand.finishReason) stopReason = cand.finishReason;
-  });
+  }, onActivity);
 
   return { text, toolCalls, reasoning, stopReason };
 }

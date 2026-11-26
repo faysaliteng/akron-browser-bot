@@ -960,6 +960,8 @@ select:focus, #input:focus { border-color: #d97757; }
 .typing-logo { width: 26px; height: 26px; flex: 0 0 auto; }
 .typing-lines { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
 #typing-text { color: var(--text); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* How long the model has been silent (set by showWait in sidepanel.js). */
+#typing-text[data-wait]::after { content: attr(data-wait); color: var(--muted); font-weight: 400; }
 /* One line of what the model is thinking. It grows at the end, so the end is
    the part kept in view and the start fades out on the left. */
 .typing-thought {
