@@ -80,7 +80,7 @@ for (const n of [
   check(`tool ${n}`, names.includes(n));
 }
 check("all tools have object schema", TOOL_DEFS.every((t) => t.parameters?.type === "object"));
-check("36 tools exposed", names.length === 36, `got ${names.length}`);
+check("37 tools exposed", names.length === 37, `got ${names.length}`);
 check("no duplicate tool names", new Set(names).size === names.length);
 
 /* ---------- 2. storage round-trip ---------- */
@@ -1408,7 +1408,17 @@ checkPage("onboarding/onboarding.js", "onboarding/onboarding.html");
 const swSrc = fs.readFileSync(path.join(ROOT, "background/service-worker.js"), "utf8");
 const panelSrc = fs.readFileSync(path.join(ROOT, "sidepanel/sidepanel.js"), "utf8");
 const sentTypes = [...new Set([...swSrc.matchAll(/type:\s*"([a-z_]+)"/g)].map((m) => m[1]))]
-  .filter((t) => !["autobot", "install", "offscreen", "basic", "transcribe"].includes(t));
+  .filter((t) => ![
+    "autobot",
+    "install",
+    "offscreen",
+    "basic",
+    "transcribe",
+    "ext_hello",
+    "ext_status_result",
+    "ext_tool_result",
+    "ext_self_update",
+  ].includes(t));
 for (const t of sentTypes) {
   check(`side panel handles "${t}"`, panelSrc.includes(`case "${t}"`));
 }
@@ -3392,6 +3402,175 @@ console.log("\n[a provider that stops answering does not hold a task forever]");
   );
 
   globalThis.fetch = realFetch;
+}
+
+/* ---------- GitHub auto-update, CRX3 packaging & self-updater ---------- */
+console.log("\n[GitHub auto-update & release builder]");
+{
+  const os = await import("node:os");
+  const http = await import("node:http");
+  const crypto = await import("node:crypto");
+  const updater = await mod("shared/updater.js");
+  const builder = await mod("tools/build-release.mjs");
+  const selfUpd = await mod("tools/update.mjs");
+
+  check("semver comparison orders versions correctly",
+    updater.compareSemver("1.6.8", "1.6.7") === 1 &&
+    updater.compareSemver("v1.6.8", "1.6.8") === 0 &&
+    updater.compareSemver("1.6.8-rc.1", "1.6.8") === -1 &&
+    updater.compareSemver("1.6.8", "1.7.0") === -1
+  );
+
+  // Public latest.json check (mocked fetch)
+  const pubCheck = await updater.checkForExtensionUpdate({
+    currentVersion: "1.6.7",
+    fetchImpl: async (url) => {
+      if (String(url).includes("/releases/latest/download/latest.json")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            version: "1.6.8",
+            tagName: "v1.6.8",
+            zipName: "AkronBrowserBot-1.6.8.zip",
+            zipUrl: "https://example.invalid/AkronBrowserBot-1.6.8.zip",
+          }),
+        };
+      }
+      return { ok: false, status: 404 };
+    },
+  });
+  check("public latest.json check detects newer release", pubCheck.ok && pubCheck.updateAvailable && pubCheck.latestVersion === "1.6.8", JSON.stringify(pubCheck));
+
+  // Private repo 404 without token gives clear guidance
+  const privMiss = await updater.checkForExtensionUpdate({
+    currentVersion: "1.6.7",
+    fetchImpl: async () => ({ ok: false, status: 404 }),
+  });
+  check("private/unreleased 404 returns actionable message", !privMiss.ok && privMiss.privateOrMissing === true && /token/i.test(privMiss.error || ""));
+
+  // Authenticated GitHub API check & prerelease channel filtering
+  let sawAuthHeader = "";
+  const preCheck = await updater.checkForExtensionUpdate({
+    currentVersion: "1.6.8",
+    channel: "prerelease",
+    token: "ghp_test123",
+    fetchImpl: async (_url, init) => {
+      sawAuthHeader = init?.headers?.Authorization || "";
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ([
+          { tag_name: "v1.6.9-beta.1", prerelease: true, draft: false, html_url: "https://github.com/faysaliteng/akron-browser-bot/releases/tag/v1.6.9-beta.1", assets: [{ name: "AkronBrowserBot-1.6.9-beta.1.zip", url: "https://api.github.com/asset/1", browser_download_url: "https://github.com/asset/1" }] },
+          { tag_name: "v1.6.8", prerelease: false, draft: false, html_url: "https://github.com/faysaliteng/akron-browser-bot/releases/tag/v1.6.8", assets: [] },
+        ]),
+      };
+    },
+  });
+  check("authenticated API check sends Bearer token and finds prerelease", sawAuthHeader === "Bearer ghp_test123" && preCheck.ok && preCheck.updateAvailable && preCheck.latestVersion === "1.6.9-beta.1", JSON.stringify(preCheck));
+
+  // Build release package into temp directory & run full HTTP self-update
+  const tmpStage = fs.mkdtempSync(path.join(os.tmpdir(), "akron-upd-stage-"));
+  const tmpOut = path.join(tmpStage, "out");
+  const tmpExt = path.join(tmpStage, "installed-167");
+  try {
+    // Seed a synthetic local-provider.json in a copy of ROOT to confirm builder excludes it
+    const srcCopy = path.join(tmpStage, "src-copy");
+    fs.cpSync(ROOT, srcCopy, {
+      recursive: true,
+      filter: (p) => !p.includes(`${path.sep}.git`) && !p.includes(`${path.sep}release`) && !p.includes(`${path.sep}node_modules`),
+    });
+    fs.writeFileSync(path.join(srcCopy, "local-provider.json"), JSON.stringify({ secret: "must-not-package" }));
+
+    const built = builder.buildReleaseArtifacts({ sourceDir: srcCopy, outDir: tmpOut, ephemeral: true });
+    check("release builder emits all 5 artifacts", built.ok && built.files.length === 5 && built.files.every((f) => fs.existsSync(path.join(tmpOut, f))), JSON.stringify(built));
+
+    const crxBytes = fs.readFileSync(path.join(tmpOut, `AkronBrowserBot-${built.version}.crx`));
+    const crxVer = builder.verifyCrx3Buffer(crxBytes);
+    check("generated CRX3 passes RSA-2048 signature verification", crxVer.ok && crxVer.extensionId === built.extensionId, JSON.stringify(crxVer));
+
+    const xmlText = fs.readFileSync(path.join(tmpOut, "updates.xml"), "utf8");
+    check("updates.xml contains Omaha gupdate and appid", xmlText.includes(`<app appid="${built.extensionId}">`) && xmlText.includes(`version="${built.version}"`));
+
+    const zipEntries = selfUpd.extractZipEntries(fs.readFileSync(path.join(tmpOut, `AkronBrowserBot-${built.version}.zip`)));
+    check("packaged ZIP excludes local-provider.json and includes manifest.json", zipEntries.some((e) => e.path === "manifest.json") && !zipEntries.some((e) => e.path.includes("local-provider.json")));
+
+    // Install a 1.6.7 checkout in tmpExt with local-provider.json preserved across update
+    fs.cpSync(srcCopy, tmpExt, { recursive: true });
+    const oldManifest = JSON.parse(fs.readFileSync(path.join(tmpExt, "manifest.json"), "utf8"));
+    oldManifest.version = "1.6.7";
+    fs.writeFileSync(path.join(tmpExt, "manifest.json"), JSON.stringify(oldManifest, null, 2));
+    fs.mkdirSync(path.join(tmpExt, ".git"), { recursive: true });
+    fs.writeFileSync(path.join(tmpExt, ".git", "HEAD"), "ref: refs/heads/main\n");
+
+    let serveCorruptSha = false;
+    const server = http.createServer((req, res) => {
+      const clean = (req.url || "/").split("?")[0].replace(/^\/+/, "");
+      const filePath = path.join(tmpOut, clean);
+      if (!filePath.startsWith(tmpOut) || !fs.existsSync(filePath)) {
+        res.writeHead(404);
+        res.end("not found");
+        return;
+      }
+      if (clean === "latest.json" && serveCorruptSha) {
+        const corrupted = JSON.parse(fs.readFileSync(filePath, "utf8"));
+        corrupted.sha256[corrupted.zipName] = "0".repeat(64);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(corrupted));
+        return;
+      }
+      res.writeHead(200);
+      fs.createReadStream(filePath).pipe(res);
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = server.address().port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const httpFetch = (url) =>
+      new Promise((resolve, reject) => {
+        const req = http.get(url, (res) => {
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => {
+            const buf = Buffer.concat(chunks);
+            resolve({
+              ok: res.statusCode >= 200 && res.statusCode < 300,
+              status: res.statusCode,
+              json: async () => JSON.parse(buf.toString("utf8")),
+              arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+            });
+          });
+        });
+        req.on("error", reject);
+      });
+    try {
+      serveCorruptSha = true;
+      let rejected = false;
+      let errMsg = "";
+      try {
+        await selfUpd.runSelfUpdate({ dir: tmpExt, baseUrl, fetchImpl: httpFetch });
+      } catch (e) {
+        errMsg = String(e?.message || e);
+        rejected = /SHA-256 verification failed/i.test(errMsg);
+      }
+      check("self-updater rejects corrupted SHA-256 before writing files", rejected && selfUpd.readInstalledVersion(tmpExt) === "1.6.7", errMsg);
+
+      serveCorruptSha = false;
+      const updRes = await selfUpd.runSelfUpdate({ dir: tmpExt, baseUrl, fetchImpl: httpFetch });
+      const afterSecret = JSON.parse(fs.readFileSync(path.join(tmpExt, "local-provider.json"), "utf8"));
+      check(
+        "self-updater upgrades 1.6.7 -> 1.6.8 via HTTP and preserves local-provider.json and .git",
+        updRes.ok && updRes.updated && updRes.latestVersion === built.version && updRes.shaVerified &&
+          selfUpd.readInstalledVersion(tmpExt) === built.version &&
+          afterSecret.secret === "must-not-package" &&
+          fs.existsSync(path.join(tmpExt, ".git", "HEAD")),
+        JSON.stringify(updRes)
+      );
+    } finally {
+      server.close();
+    }
+  } finally {
+    fs.rmSync(tmpStage, { recursive: true, force: true });
+  }
 }
 
 /* ---------- summary ---------- */

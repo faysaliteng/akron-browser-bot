@@ -27,6 +27,21 @@ provider you chose.
 
 ---
 
+## Automatic Updates from GitHub
+
+Akron Browser Bot checks [`faysaliteng/akron-browser-bot`](https://github.com/faysaliteng/akron-browser-bot) for new GitHub Releases (`stable` or `prerelease` channel):
+
+- **In the browser (`chrome.alarms`)**: checks in the background every 4 hours, shows an `"UP"` badge + update banner in the side panel, and exposes **Settings → Updates from GitHub** (`Check now` / `Update now`, plus optional GitHub token if the repository is private).
+- **Hands-free CLI / unpacked folder update**:
+  ```bash
+  npm run update:check
+  npm run update
+  ```
+  Downloads the verified ZIP + `SHA256SUMS.txt`, updates extension files atomically, and preserves your `local-provider.json` and `.git/` checkout.
+- **CRX3 Omaha manifest**: Every release publishes `AkronBrowserBot-<ver>.crx` configured with `update_url` pointing to `updates.xml` on GitHub Releases alongside `AkronBrowserBot-<ver>.zip` and `latest.json`.
+
+---
+
 ## Add an API key
 
 **New to API keys?** [docs/API-KEYS.md](docs/API-KEYS.md) explains, provider by

@@ -17,6 +17,7 @@ export function createBridgeLink({
   url = BRIDGE_URL,
   createSocket,
   onMessage,
+  onOpen,
   retryMs = BRIDGE_RETRY_MS,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
@@ -34,6 +35,11 @@ export function createBridgeLink({
       return;
     }
     socket = next;
+    next.onopen = () => {
+      if (typeof onOpen === "function") {
+        try { onOpen(next); } catch {}
+      }
+    };
     next.onmessage = (event) => onMessage(event, next);
     next.onerror = () => {};
     next.onclose = () => {
@@ -47,6 +53,15 @@ export function createBridgeLink({
   };
 
   return {
+    send(payload) {
+      if (!socket || socket.readyState !== 1) return false;
+      try {
+        socket.send(typeof payload === "string" ? payload : JSON.stringify(payload));
+        return true;
+      } catch {
+        return false;
+      }
+    },
     setEnabled(value) {
       const wanted = !!value;
       if (wanted === enabled) return;
