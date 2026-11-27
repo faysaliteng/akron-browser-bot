@@ -1680,6 +1680,34 @@ console.log("\n[desktop bridge default + toggle]");
       optionsSrc.includes('desktopBridge: $("s-bridge").checked') &&
       optionsSrc.includes('$("s-bridge").checked = !!settings.desktopBridge')
   );
+
+  // Pre-flight health probe skips creating WebSocket when :8766 is offline (zero console error spam)
+  let probeReturn = false;
+  let probedCount = 0;
+  const probeSockets = [];
+  const probeTimers = [];
+  const probedLink = bridgeLib.createBridgeLink({
+    probeReachable: async () => {
+      probedCount += 1;
+      return probeReturn;
+    },
+    createSocket: (url) => {
+      const s = { url, closed: false, close() { this.closed = true; } };
+      probeSockets.push(s);
+      return s;
+    },
+    onMessage() {},
+    retryMs: 5,
+    setTimer: (fn) => { probeTimers.push(fn); return probeTimers.length; },
+    clearTimer: () => {},
+  });
+  probedLink.setEnabled(true);
+  await new Promise((r) => setTimeout(r, 10));
+  check("probeReachable=false skips createSocket completely (zero extension error spam)", probedCount === 1 && probeSockets.length === 0 && probeTimers.length === 1);
+  probeReturn = true;
+  probeTimers[0]();
+  await new Promise((r) => setTimeout(r, 10));
+  check("probeReachable=true opens WebSocket once bridge is reachable", probedCount === 2 && probeSockets.length === 1);
 }
 
 /* ---------- several tabs at once ---------- */
