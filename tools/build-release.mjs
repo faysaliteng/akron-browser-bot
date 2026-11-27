@@ -26,6 +26,7 @@ const EXCLUDED_TOP = new Set([
   "local-provider.json",
   "release",
   "dist",
+  "screenshots",
   "tests",
   "node_modules",
 ]);
