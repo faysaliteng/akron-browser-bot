@@ -3601,6 +3601,31 @@ console.log("\n[GitHub auto-update & release builder]");
   }
 }
 
+{
+  const { PROVIDER_PRESETS, presetByKey } = await import(pathToFileURL(path.join(ROOT, "shared/presets.js")).href);
+  const desk = presetByKey("akron-desktop");
+  check(
+    "PROVIDER_PRESETS includes zero-key akron-desktop (:8766) preset first",
+    PROVIDER_PRESETS[0]?.key === "akron-desktop" &&
+      desk?.baseUrl === "http://127.0.0.1:8766/v1" &&
+      desk?.noKey === true &&
+      Array.isArray(desk?.models) &&
+      desk.models.includes("akron-default"),
+    JSON.stringify(desk)
+  );
+}
+
+{
+  const optionsSrc = fs.readFileSync(path.join(ROOT, "options/options.js"), "utf8");
+  check(
+    "options page auto-saves #s-orchestrator, pool changes, agent/policy/tools, and flushes on pagehide",
+    /\$\("s-orchestrator"\)\?\.addEventListener\("change",[\s\S]{0,160}saveOrchestrator\(\)/.test(optionsSrc) &&
+      /\$\("orch-pool"\)\.addEventListener\("change",[\s\S]{0,160}saveOrchestrator\(\)/.test(optionsSrc) &&
+      /\$\("confirm-tools-list"\)\?\.addEventListener\("change",[\s\S]{0,160}saveToolSettings\(\)/.test(optionsSrc) &&
+      /window\.addEventListener\("pagehide",\s*flushUnsavedOptions\)/.test(optionsSrc)
+  );
+}
+
 /* ---------- summary ---------- */
 console.log(`\n==== ${pass} passed, ${fail} failed ====`);
 process.exit(fail ? 1 : 0);
