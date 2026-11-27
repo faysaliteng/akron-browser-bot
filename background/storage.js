@@ -39,7 +39,7 @@ export const DEFAULT_SETTINGS = {
   soundOnComplete: true,
   notifyOnComplete: true,
   nativeHost: false,
-  desktopBridge: false,
+  desktopBridge: true,
   autoUpdate: true,
   updateChannel: "stable",
   githubUpdateToken: "",

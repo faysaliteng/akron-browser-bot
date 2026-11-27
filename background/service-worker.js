@@ -174,7 +174,7 @@ function syncUpdateBadge(updateState) {
 }
 
 async function getUpdateState() {
-  const currentVersion = chrome.runtime?.getManifest?.().version || "1.6.8";
+  const currentVersion = chrome.runtime?.getManifest?.().version || "1.6.10";
   try {
     const r = await chrome.storage.local.get(UPDATE_STATE_KEY);
     const saved = r?.[UPDATE_STATE_KEY];
@@ -221,7 +221,7 @@ async function checkForUpdatesNow({ manual = false } = {}) {
     getSettings().catch(() => ({})),
     getUpdateState(),
   ]);
-  const currentVersion = chrome.runtime?.getManifest?.().version || "1.6.8";
+  const currentVersion = chrome.runtime?.getManifest?.().version || "1.6.10";
   const result = await checkForExtensionUpdate({
     currentVersion,
     repo: GITHUB_REPO,

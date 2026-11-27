@@ -1619,12 +1619,12 @@ console.log("\n[regressions]");
   );
 }
 
-/* ---------- desktop bridge is opt-in ---------- */
-console.log("\n[desktop bridge opt-in]");
+/* ---------- desktop bridge connects seamlessly by default ---------- */
+console.log("\n[desktop bridge default + toggle]");
 {
-  // With nothing listening on the local port the browser logs every attempt as
-  // an extension error, so the bridge must not connect unless it is turned on.
-  check("desktop bridge is off by default", storage.DEFAULT_SETTINGS.desktopBridge === false);
+  // Connects seamlessly to Akron Code Desktop or standalone :8766 bridge by default,
+  // and cleanly disables / disconnects if the user toggles desktopBridge off.
+  check("desktop bridge is enabled by default", storage.DEFAULT_SETTINGS.desktopBridge === true);
 
   const sockets = [];
   const timers = [];
